@@ -29,7 +29,8 @@ TELEGRAM_MAX_OPCION = 100
 TELEGRAM_MAX_EXPLICACION = 200
 
 MENSAJE_BIENVENIDA = (
-    "👋 ¡Bienvenido/a a *OrdenanzaCordoba* (`@ordenayuncordoba_bot`)!\n\n"
+    "👋 ¡Bienvenido/a a *OrdenanzaCordoba* (`@ordenayuncordoba_bot`), "
+    "el bot de estudio creado por *Pako García*!\n\n"
     "✅ Tu suscripción está activa. Recibirás automáticamente una batería de *5 preguntas tipo test* "
     "en las tres franjas diarias (*09:00, 14:00 y 20:00 h*).\n\n"
     "🧭 *¿Cómo responder a los tests?*\n"

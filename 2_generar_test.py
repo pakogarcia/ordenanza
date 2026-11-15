@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import json
 import os
 import random
@@ -32,7 +33,7 @@ MENSAJE_BIENVENIDA = (
     "👋 ¡Bienvenido/a a *OrdenanzaCordoba* (`@ordenayuncordoba_bot`), "
     "el bot de estudio creado por *Pako García*!\n\n"
     "✅ Tu suscripción está activa. Recibirás automáticamente una batería de *5 preguntas tipo test* "
-    "en las tres franjas diarias (*09:00, 14:00 y 20:00 h*).\n\n"
+    "en las tres franjas diarias (*09:00, 14:00 y 20:00 h*) y, al cerrar la última tanda de la noche, el *💡 TIP DE HOY*.\n\n"
     "🧭 *¿Cómo responder a los tests?*\n"
     "1️⃣ Toca directamente la opción que creas correcta.\n"
     "2️⃣ Si sale *verde (✅)*, has acertado; si sale *roja (❌)*, verás marcada en verde la opción correcta.\n"
@@ -55,11 +56,11 @@ class PreguntaTest(BaseModel):
     )
 
 
-SYSTEM_INSTRUCTION = """Eres un vocal experto de un Tribunal Calificador de oposiciones de la Administración General del Estado (AGE) y Administración Local.
+SYSTEM_INSTRUCTION = """Eres un vocal experto de un Tribunal Calificador de oposiciones de la Administración General del Estado (AGE) y de Ordenanza/Subalterno del Ayuntamiento de Córdoba.
 Tu misión es redactar preguntas tipo test oficiales de alta calidad técnica siguiendo estas reglas estrictas:
 
 1. LITERALIDAD NORMATIVA: Básate única y exclusivamente en el texto literal del artículo o fragmento proporcionado. No utilices conocimientos externos ni supongas preceptos no incluidos en el fragmento.
-2. ESTILO Y ALTERNANCIA: Redacta con rigor jurídico propio de exámenes oficiales. Alterna entre preguntas directas (ej. «Según el artículo X de la Constitución Española...») y preguntas en negativo (ej. «Conforme al artículo X de la Constitución Española, señale la afirmación INCORRECTA:»).
+2. ESTILO Y ALTERNANCIA: Redacta con rigor jurídico propio de exámenes oficiales. Alterna según se te pida entre preguntas directas, preguntas en negativo («Señale la afirmación INCORRECTA») y supuestos prácticos aplicados a un Ordenanza del Ayuntamiento de Córdoba.
 3. DISTRACTORES PLAUSIBLES: Diseña opciones incorrectas verosímiles empleando trampas clásicas de examen oficial:
    - Alterar plazos, edades o mayorías cercanas (ej. mayoría absoluta por mayoría simple, tres quintos por dos tercios).
    - Intercambiar órganos o sujetos (ej. Gobierno, Cortes Generales, Congreso, Senado, Rey, Tribunal Constitucional, Alcalde, Pleno, ley orgánica por ley ordinaria).
@@ -73,15 +74,8 @@ Tu misión es redactar preguntas tipo test oficiales de alta calidad técnica si
 """
 
 
-def sincronizar_suscriptores(
-    bot_token: str,
-    channel_id_principal: str | None,
-    db_path: str = DB_PATH,
-) -> list[str]:
-    """
-    Registra en la tabla `suscriptores` de SQLite a todos los usuarios que hayan pulsado
-    /start o escrito al bot, enviándoles una leyenda de bienvenida la primera vez.
-    """
+def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
+    """Asegura que existan las tablas `suscriptores` y `tips_enviados` en SQLite."""
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -93,6 +87,32 @@ def sincronizar_suscriptores(
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tips_enviados (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fragmento_id INTEGER,
+                referencia TEXT,
+                tip TEXT,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
+
+
+def sincronizar_suscriptores(
+    bot_token: str,
+    channel_id_principal: str | None,
+    db_path: str = DB_PATH,
+) -> list[str]:
+    """
+    Registra en la tabla `suscriptores` de SQLite a todos los usuarios que hayan pulsado
+    /start o escrito al bot, enviándoles una leyenda de bienvenida la primera vez.
+    """
+    inicializar_tablas_auxiliares(db_path)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
         if channel_id_principal and channel_id_principal != "@tu_canal_o_id_numerico_aqui":
             cursor.execute(
                 "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
@@ -125,7 +145,6 @@ def sincronizar_suscriptores(
                             (cid, nombre),
                         )
                         existentes.add(cid)
-                        # Enviar mensaje de bienvenida con instrucciones de uso
                         try:
                             requests.post(
                                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -250,18 +269,27 @@ def generar_pregunta_con_gemini(
     referencia: str,
     contenido: str,
     ejemplos: str,
-    es_negativa: bool | None = None,
+    modalidad: str = "directa",
     max_reintentos_resumen: int = 3,
 ) -> PreguntaTest:
-    """Genera una pregunta tipo test con Gemini y valida/resume longitudes si exceden límites."""
-    if es_negativa is None:
-        es_negativa = random.choice([False, True])
-
-    modalidad_sugerida = (
-        "en negativo (pidiendo señalar la opción INCORRECTA o falsa respecto al precepto)"
-        if es_negativa
-        else "directa (preguntando por la afirmación correcta o literal según el precepto)"
-    )
+    """
+    Genera una pregunta tipo test con Gemini según la modalidad ('directa', 'negativa' o 'caso_practico')
+    y valida/resume longitudes si exceden límites.
+    """
+    if modalidad == "caso_practico":
+        instruccion_modalidad = (
+            "de SUPUESTO PRÁCTICO breve aplicado a un Ordenanza/Subalterno del Ayuntamiento de Córdoba "
+            "(ej. en conserjería, atención a un ciudadano o dependencia municipal surge una duda o situación práctica "
+            "que se resuelve aplicando estrictamente lo dispuesto en este precepto). Empieza el enunciado con '[Caso práctico]'"
+        )
+    elif modalidad == "negativa":
+        instruccion_modalidad = (
+            "en negativo (pidiendo señalar la opción INCORRECTA o falsa respecto al precepto)"
+        )
+    else:
+        instruccion_modalidad = (
+            "directa (preguntando por la afirmación correcta o literal según el precepto)"
+        )
 
     bloque_ejemplos = ""
     if ejemplos:
@@ -270,7 +298,7 @@ def generar_pregunta_con_gemini(
             f"\"\"\"\n{ejemplos}\n\"\"\"\n"
         )
 
-    prompt = f"""Genera una pregunta oficial tipo test de oposición (AGE) a partir del siguiente fragmento normativo:
+    prompt = f"""Genera una pregunta oficial tipo test de oposición a partir del siguiente fragmento normativo:
 
 REFERENCIA: {referencia}
 TEXTO LITERAL:
@@ -278,7 +306,7 @@ TEXTO LITERAL:
 {contenido}
 \"\"\"
 {bloque_ejemplos}
-MODALIDAD REQUERIDA EN ESTE TURNO: Redacta una pregunta {modalidad_sugerida}.
+MODALIDAD REQUERIDA EN ESTE TURNO: Redacta una pregunta {instruccion_modalidad}.
 Recuerda ajustar las longitudes: pregunta <= 280 caracteres, cada una de las 4 opciones <= 95 caracteres, explicacion <= 190 caracteres citando expresamente '{referencia}'."""
 
     config = types.GenerateContentConfig(
@@ -332,6 +360,141 @@ Texto original de referencia ({referencia}):
     return pregunta_test
 
 
+def construir_cabecera_tanda(fragmentos: list[tuple[int, str, str, int]]) -> str:
+    """Construye el mensaje de cabecera que anuncia la batería de 5 preguntas."""
+    hora_utc = datetime.now(timezone.utc).hour
+    if hora_utc < 11:
+        franja = "☀️ TANDA DE MAÑANA (09:00 h)"
+    elif hora_utc < 16:
+        franja = "🕑 TANDA DE MEDIODÍA (14:00 h)"
+    else:
+        franja = "🌙 TANDA DE NOCHE (20:00 h)"
+
+    referencias = ", ".join(f[1] for f in fragmentos)
+    return (
+        f"📌 *{franja} — {len(fragmentos)} PREGUNTAS*\n"
+        f"📚 *Artículos en juego:* {referencias}\n"
+        f"🏛️ _Incluye preguntas directas, en negativo y 1 supuesto práctico de Ordenanza._"
+    )
+
+
+def debe_enviar_tip_hoy() -> bool:
+    """
+    Determina si corresponde enviar el TIP DE HOY (al final del día en la tanda de las 20:00 h,
+    o cuando se fuerza mediante ENVIAR_TIP=1).
+    """
+    forzar = os.getenv("ENVIAR_TIP", "").strip().lower()
+    if forzar in ("1", "true", "si", "sí", "always"):
+        return True
+    if forzar in ("0", "false", "no"):
+        return False
+    # La tanda de las 20:00 h en España se ejecuta a las 19:00 UTC (invierno) / 18:00 UTC (verano)
+    hora_utc = datetime.now(timezone.utc).hour
+    return hora_utc >= 17
+
+
+def generar_y_guardar_tip_de_hoy(
+    client: genai.Client,
+    db_path: str = DB_PATH,
+) -> str:
+    """
+    Selecciona un fragmento sobre el que aún no se haya generado un TIP (o el menos usado para tips),
+    consulta los tips anteriores para no repetir nunca la misma idea, y guarda el nuevo TIP en SQLite.
+    """
+    inicializar_tablas_auxiliares(db_path)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        # Elegir un artículo priorizando aquellos que nunca han tenido un TIP DE HOY
+        cursor.execute(
+            """
+            SELECT f.id, f.referencia, f.contenido, COUNT(t.id) AS num_tips
+            FROM fragmentos f
+            LEFT JOIN tips_enviados t ON f.id = t.fragmento_id
+            GROUP BY f.id
+            ORDER BY num_tips ASC, RANDOM()
+            LIMIT 1
+            """
+        )
+        fila = cursor.fetchone()
+        if not fila:
+            raise ValueError("No hay fragmentos en la base de datos para generar el TIP DE HOY.")
+        frag_id, referencia, contenido, _ = fila
+
+        cursor.execute(
+            "SELECT referencia, tip FROM tips_enviados ORDER BY id DESC LIMIT 15"
+        )
+        tips_recientes = cursor.fetchall()
+
+    resumen_previos = ""
+    if tips_recientes:
+        lista_previos = "\n".join(f"- [{ref}]: {txt[:120]}..." for ref, txt in tips_recientes)
+        resumen_previos = (
+            "\nTIPS ENVIADOS EN DÍAS ANTERIORES (NO repitas estas ideas ni estos trucos):\n"
+            f"{lista_previos}\n"
+        )
+
+    prompt_tip = f"""Redacta una píldora de estudio memorable y directa para opositores de Ordenanza del Ayuntamiento de Córdoba a partir de este precepto del temario:
+
+REFERENCIA: {referencia}
+TEXTO LITERAL:
+\"\"\"
+{contenido}
+\"\"\"
+{resumen_previos}
+INSTRUCCIONES DE FORMATO:
+1. Empieza OBLIGATORIAMENTE con esta primera línea exacta:
+💡 *TIP DE HOY*
+2. En la segunda línea indica en negrita la referencia: *{referencia}*
+3. En 3 a 5 líneas claras y muy visuales (usando viñetas cortas), destaca la IDEA FUNDAMENTAL del precepto, la "trampa típica de examen" que suelen poner los tribunales (plazos, mayorías, órgano competente o excepción) y una regla mnemotécnica o clave rápida para no fallarla nunca.
+4. No superes los 850 caracteres en total y usa formato Markdown compatible con Telegram (*negrita*, _cursiva_)."""
+
+    config = types.GenerateContentConfig(
+        temperature=0.5,
+    )
+    response = llamar_gemini(client=client, contents=prompt_tip, config=config)
+    texto_tip = response.text.strip()
+    if not texto_tip.startswith("💡"):
+        texto_tip = f"💡 *TIP DE HOY*\n\n{texto_tip}"
+
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO tips_enviados (fragmento_id, referencia, tip) VALUES (?, ?, ?)",
+            (frag_id, referencia, texto_tip),
+        )
+        conn.commit()
+
+    return texto_tip
+
+
+def enviar_mensaje_telegram(
+    bot_token: str,
+    channel_id: str,
+    texto: str,
+) -> None:
+    """Envía un mensaje de texto a un chat o canal de Telegram."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    resp = requests.post(
+        url,
+        json={
+            "chat_id": channel_id,
+            "text": texto,
+            "parse_mode": "Markdown",
+        },
+        timeout=20,
+    )
+    if not resp.ok:
+        # Reintentar sin parse_mode por si algún carácter especial de Markdown da conflicto
+        requests.post(
+            url,
+            json={
+                "chat_id": channel_id,
+                "text": texto,
+            },
+            timeout=20,
+        )
+
+
 def enviar_poll_telegram(
     bot_token: str,
     channel_id: str,
@@ -361,6 +524,7 @@ def enviar_poll_telegram(
 def imprimir_resultado_consola(
     num_orden: int,
     total_tanda: int,
+    modalidad: str,
     frag_id: int,
     referencia: str,
     veces_usado_previo: int,
@@ -369,7 +533,7 @@ def imprimir_resultado_consola(
     """Imprime la pregunta generada formateada por consola para su revisión."""
     letras = ["A", "B", "C", "D"]
     print("=" * 72)
-    print(f"  PREGUNTA {num_orden}/{total_tanda} TIPO TEST (ESTILO OFICIAL AGE)")
+    print(f"  PREGUNTA {num_orden}/{total_tanda} [{modalidad.upper()}]")
     print("=" * 72)
     print(
         f"Fragmento seleccionado : ID {frag_id} | {referencia} (usos previos: {veces_usado_previo} -> ahora: {veces_usado_previo + 1})"
@@ -407,6 +571,8 @@ def main() -> None:
         )
         sys.exit(1)
 
+    inicializar_tablas_auxiliares(DB_PATH)
+
     destinatarios = []
     if bot_token and bot_token != "tu_bot_token_de_telegram_aqui":
         destinatarios = sincronizar_suscriptores(bot_token, channel_id, DB_PATH)
@@ -417,19 +583,35 @@ def main() -> None:
     client = genai.Client(api_key=api_key)
 
     total = len(fragmentos)
-    print(f"Generando batería de {total} preguntas tipo test...\n")
+    cabecera = construir_cabecera_tanda(fragmentos)
+    print(f"\n{cabecera}\n")
 
+    # 1. Enviar mensaje de cabecera de la tanda (Mejora 2)
+    if destinatarios:
+        for dest_id in destinatarios:
+            try:
+                enviar_mensaje_telegram(bot_token, dest_id, cabecera)
+            except Exception as e:
+                print(f"[Aviso] Error enviando cabecera a {dest_id}: {e}")
+
+    # 2. Generar y enviar las 5 preguntas (la 5.ª como Caso Práctico de Ordenanza - Mejora 4)
     for idx, (frag_id, referencia, contenido, veces_usado) in enumerate(fragmentos, start=1):
-        es_negativa = (idx % 2 == 0)
+        if idx == total:
+            modalidad = "caso_practico"
+        elif idx % 2 == 0:
+            modalidad = "negativa"
+        else:
+            modalidad = "directa"
+
         pregunta_test = generar_pregunta_con_gemini(
             client=client,
             referencia=referencia,
             contenido=contenido,
             ejemplos=ejemplos,
-            es_negativa=es_negativa,
+            modalidad=modalidad,
         )
 
-        imprimir_resultado_consola(idx, total, frag_id, referencia, veces_usado, pregunta_test)
+        imprimir_resultado_consola(idx, total, modalidad, frag_id, referencia, veces_usado, pregunta_test)
 
         if destinatarios:
             enviados_ok = 0
@@ -438,7 +620,7 @@ def main() -> None:
                     enviar_poll_telegram(bot_token, dest_id, pregunta_test)
                     enviados_ok += 1
                 except Exception as e:
-                    print(f"[Aviso] No se pudo enviar a {dest_id}: {e}")
+                    print(f"[Aviso] No se pudo enviar Poll a {dest_id}: {e}")
             print(f"✅ Pregunta {idx}/{total} enviada a {enviados_ok}/{len(destinatarios)} suscriptores.\n")
             if idx < total:
                 time.sleep(1.5)
@@ -446,6 +628,23 @@ def main() -> None:
             print("ℹ️ Credenciales de Telegram no configuradas; solo se mostró por consola.\n")
 
         incrementar_uso_fragmento(frag_id)
+
+    # 3. Al final del día (tanda de las 20:00 h o si se fuerza ENVIAR_TIP=1), enviar el TIP DE HOY (Mejora 3)
+    if debe_enviar_tip_hoy():
+        print("Generando 💡 TIP DE HOY (cierre del día)...")
+        texto_tip = generar_y_guardar_tip_de_hoy(client=client, db_path=DB_PATH)
+        print("\n" + "=" * 72)
+        print(texto_tip)
+        print("=" * 72 + "\n")
+
+        if destinatarios:
+            time.sleep(2.0)
+            for dest_id in destinatarios:
+                try:
+                    enviar_mensaje_telegram(bot_token, dest_id, texto_tip)
+                except Exception as e:
+                    print(f"[Aviso] Error enviando TIP DE HOY a {dest_id}: {e}")
+            print("✅ 💡 TIP DE HOY enviado a todos los suscriptores.")
 
 
 if __name__ == "__main__":

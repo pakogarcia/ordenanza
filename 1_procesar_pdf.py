@@ -1,23 +1,31 @@
+import glob
 import os
 import re
 import sqlite3
 import pymupdf  # fitz
 
 
-PDF_CANDIDATES = ["Tema1-Constitucion.pdf", "temario.pdf"]
 DB_PATH = "temario.db"
 CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
 
 
-def obtener_ruta_pdf() -> str:
-    """Devuelve la ruta del PDF del temario disponible en la raíz del proyecto."""
-    for ruta in PDF_CANDIDATES:
-        if os.path.exists(ruta):
-            return ruta
-    raise FileNotFoundError(
-        f"No se encontró ninguno de los archivos esperados: {', '.join(PDF_CANDIDATES)}"
-    )
+def obtener_archivos_pdf() -> list[str]:
+    """Devuelve todos los archivos PDF presentes en la raíz del proyecto ordenados por nombre."""
+    archivos = sorted(glob.glob("*.pdf"))
+    if not archivos:
+        raise FileNotFoundError(
+            "No se encontró ningún archivo .pdf en la carpeta del proyecto."
+        )
+    return archivos
+
+
+def nombre_tema_desde_archivo(ruta_pdf: str) -> str:
+    """Genera un nombre legible del tema/ley a partir del nombre del archivo PDF."""
+    base = os.path.splitext(os.path.basename(ruta_pdf))[0].strip()
+    base_limpio = re.sub(r"[_]+", " ", base)
+    base_limpio = re.sub(r"\s*-\s*", " - ", base_limpio)
+    return base_limpio
 
 
 def limpiar_texto_paginas(doc: pymupdf.Document) -> str:
@@ -32,7 +40,6 @@ def limpiar_texto_paginas(doc: pymupdf.Document) -> str:
             for candidata in (lineas[0], lineas[-1]):
                 posibles_encabezados_pies[candidata] = posibles_encabezados_pies.get(candidata, 0) + 1
 
-    # Encabezados o pies que se repiten en al menos 3 páginas
     umbral_repeticion = max(3, len(doc) // 3)
     encabezados_pies_repetidos = {
         linea
@@ -44,7 +51,6 @@ def limpiar_texto_paginas(doc: pymupdf.Document) -> str:
         r"^(?:p[áa]gina\s*\d+(?:\s*de\s*\d+)?|\d+\s*/\s*\d+|-\s*\d+\s*-|\d+)$",
         re.IGNORECASE,
     )
-    # Títulos/Capítulos/Secciones estructurales para que no queden pegados al final del artículo previo
     patron_estructura = re.compile(
         r"^(?:T[ÍI]TULO\s+[IVXLCDM0-9]+.*|T[ÍI]TULO\s+PRELIMINAR.*|"
         r"CAP[ÍI]TULO\s+(?:PRIMERO|SEGUNDO|TERCERO|CUARTO|QUINTO|[IVXLCDM0-9]+).*|"
@@ -89,10 +95,10 @@ def normalizar_espacios_y_saltos(texto: str) -> str:
     return "".join(resultado).strip()
 
 
-def dividir_en_fragmentos(texto: str) -> list[tuple[str, str]]:
+def dividir_en_fragmentos(texto: str, nombre_tema: str) -> list[tuple[str, str]]:
     """
-    Divide el texto por artículos (ej. 'Artículo 1.', 'Art. 1', 'Artículo 14').
-    Si no detecta artículos, lo divide en fragmentos lógicos de ~1.500 caracteres con solapamiento.
+    Divide el texto por artículos (ej. 'Artículo 1.', 'Art. 1', 'Artículo 14') o en bloques
+    de ~1.500 caracteres con solapamiento, anteponiendo el nombre del tema/ley en la referencia.
     """
     patron_articulo = re.compile(
         r"(?m)^((?:Art[íi]culo|Art\.)\s+\d+(?:\s*(?:bis|ter|quater))?)\.?\s*$",
@@ -100,7 +106,6 @@ def dividir_en_fragmentos(texto: str) -> list[tuple[str, str]]:
     )
     coincidencias = list(patron_articulo.finditer(texto))
 
-    # Si no se detectan en líneas propias, buscar también en inicio de línea con texto seguido
     if not coincidencias:
         patron_articulo_inline = re.compile(
             r"(?m)^((?:Art[íi]culo|Art\.)\s+\d+(?:\s*(?:bis|ter|quater))?)\.?\s+",
@@ -113,9 +118,9 @@ def dividir_en_fragmentos(texto: str) -> list[tuple[str, str]]:
     if coincidencias:
         for i, match in enumerate(coincidencias):
             ref_bruta = match.group(1).strip()
-            # Normalizar referencia a formato 'Artículo X'
             num_match = re.search(r"\d+(?:\s*(?:bis|ter|quater))?", ref_bruta, re.IGNORECASE)
-            referencia = f"Artículo {num_match.group(0)}" if num_match else ref_bruta
+            art_str = f"Artículo {num_match.group(0)}" if num_match else ref_bruta
+            referencia = f"{nombre_tema} | {art_str}"
 
             inicio_contenido = match.end()
             fin_contenido = coincidencias[i + 1].start() if i + 1 < len(coincidencias) else len(texto)
@@ -133,7 +138,6 @@ def dividir_en_fragmentos(texto: str) -> list[tuple[str, str]]:
         while inicio < longitud:
             fin = min(inicio + CHUNK_SIZE, longitud)
             if fin < longitud:
-                # Intentar cortar en el último punto o salto de línea dentro del rango
                 ultimo_corte = max(
                     texto_limpio.rfind(". ", inicio + CHUNK_SIZE // 2, fin),
                     texto_limpio.rfind("\n", inicio + CHUNK_SIZE // 2, fin),
@@ -143,7 +147,8 @@ def dividir_en_fragmentos(texto: str) -> list[tuple[str, str]]:
 
             fragmento = texto_limpio[inicio:fin].strip()
             if fragmento:
-                fragmentos.append((f"Fragmento {num_frag}", fragmento))
+                referencia = f"{nombre_tema} | Fragmento {num_frag}"
+                fragmentos.append((referencia, fragmento))
                 num_frag += 1
 
             if fin >= longitud:
@@ -153,8 +158,14 @@ def dividir_en_fragmentos(texto: str) -> list[tuple[str, str]]:
     return fragmentos
 
 
-def guardar_en_sqlite(fragmentos: list[tuple[str, str]], db_path: str = DB_PATH) -> None:
-    """Crea la tabla fragmentos en SQLite y guarda los fragmentos procesados."""
+def guardar_en_sqlite_preservando_usos(
+    todos_los_fragmentos: list[tuple[str, str]],
+    db_path: str = DB_PATH,
+) -> tuple[int, int]:
+    """
+    Guarda o actualiza los fragmentos en SQLite conservando el contador `veces_usado`
+    de los fragmentos que ya existían en la base de datos.
+    """
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -167,23 +178,54 @@ def guardar_en_sqlite(fragmentos: list[tuple[str, str]], db_path: str = DB_PATH)
             )
             """
         )
+
+        # Recuperar usos previos por referencia (y por artículo simple si venía de la versión monoley)
+        cursor.execute("SELECT referencia, veces_usado FROM fragmentos")
+        usos_previos = {}
+        for ref_existente, veces in cursor.fetchall():
+            usos_previos[ref_existente] = max(usos_previos.get(ref_existente, 0), veces)
+
+        nuevos = 0
+        actualizados = 0
+        registros_finales = []
+
+        for referencia, contenido in todos_los_fragmentos:
+            art_simple = referencia.split(" | ")[-1] if " | " in referencia else referencia
+            if referencia in usos_previos:
+                veces = usos_previos[referencia]
+                actualizados += 1
+            elif "Tema1" in referencia and art_simple in usos_previos:
+                veces = usos_previos[art_simple]
+                actualizados += 1
+            else:
+                veces = 0
+                nuevos += 1
+            registros_finales.append((referencia, contenido, veces))
+
         cursor.execute("DELETE FROM fragmentos")
         cursor.executemany(
-            "INSERT INTO fragmentos (referencia, contenido, veces_usado) VALUES (?, ?, 0)",
-            fragmentos,
+            "INSERT INTO fragmentos (referencia, contenido, veces_usado) VALUES (?, ?, ?)",
+            registros_finales,
         )
         conn.commit()
 
+    return nuevos, actualizados
+
 
 def main() -> None:
-    ruta_pdf = obtener_ruta_pdf()
-    print(f"Procesando archivo PDF: {ruta_pdf}")
+    archivos_pdf = obtener_archivos_pdf()
+    print(f"Archivos PDF detectados ({len(archivos_pdf)}): {', '.join(archivos_pdf)}\n")
 
-    with pymupdf.open(ruta_pdf) as doc:
-        texto_limpio = limpiar_texto_paginas(doc)
+    todos_los_fragmentos: list[tuple[str, str]] = []
+    for ruta_pdf in archivos_pdf:
+        nombre_tema = nombre_tema_desde_archivo(ruta_pdf)
+        with pymupdf.open(ruta_pdf) as doc:
+            texto_limpio = limpiar_texto_paginas(doc)
+        fragmentos_pdf = dividir_en_fragmentos(texto_limpio, nombre_tema)
+        print(f"  - {ruta_pdf} -> {len(fragmentos_pdf)} fragmentos ({nombre_tema})")
+        todos_los_fragmentos.extend(fragmentos_pdf)
 
-    fragmentos = dividir_en_fragmentos(texto_limpio)
-    guardar_en_sqlite(fragmentos, DB_PATH)
+    nuevos, conservados = guardar_en_sqlite_preservando_usos(todos_los_fragmentos, DB_PATH)
 
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
@@ -193,7 +235,10 @@ def main() -> None:
         cursor.execute("SELECT id, referencia, contenido, veces_usado FROM fragmentos ORDER BY id LIMIT 3")
         primeros_tres = cursor.fetchall()
 
-    print(f"\nTotal de fragmentos guardados en '{DB_PATH}': {total}\n")
+    print(
+        f"\nBase de datos '{DB_PATH}' actualizada: {total} fragmentos totales "
+        f"({nuevos} nuevos, {conservados} existentes con su contador conservado).\n"
+    )
     print("=== EJEMPLO DE LOS 3 PRIMEROS FRAGMENTOS ===")
     for fila_id, referencia, contenido, veces_usado in primeros_tres:
         print(f"\n[ID: {fila_id}] Referencia: {referencia} | Veces usado: {veces_usado}")

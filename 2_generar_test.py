@@ -28,6 +28,16 @@ TELEGRAM_MAX_PREGUNTA = 300
 TELEGRAM_MAX_OPCION = 100
 TELEGRAM_MAX_EXPLICACION = 200
 
+MENSAJE_BIENVENIDA = (
+    "👋 ¡Bienvenido/a a *OrdenanzaCordoba* (`@ordenayuncordoba_bot`)!\n\n"
+    "✅ Tu suscripción está activa. Recibirás automáticamente una batería de *5 preguntas tipo test* "
+    "en las tres franjas diarias (*09:00, 14:00 y 20:00 h*).\n\n"
+    "🧭 *¿Cómo responder a los tests?*\n"
+    "1️⃣ Toca directamente la opción que creas correcta.\n"
+    "2️⃣ Si sale *verde (✅)*, has acertado; si sale *roja (❌)*, verás marcada en verde la opción correcta.\n"
+    "3️⃣ Toca el icono de la *bombilla azul (💡)* arriba a la derecha de cada tarjeta para leer la explicación jurídica con el artículo exacto."
+)
+
 
 class PreguntaTest(BaseModel):
     pregunta: str = Field(
@@ -44,14 +54,14 @@ class PreguntaTest(BaseModel):
     )
 
 
-SYSTEM_INSTRUCTION = """Eres un vocal experto de un Tribunal Calificador de oposiciones de la Administración General del Estado (AGE).
+SYSTEM_INSTRUCTION = """Eres un vocal experto de un Tribunal Calificador de oposiciones de la Administración General del Estado (AGE) y Administración Local.
 Tu misión es redactar preguntas tipo test oficiales de alta calidad técnica siguiendo estas reglas estrictas:
 
 1. LITERALIDAD NORMATIVA: Básate única y exclusivamente en el texto literal del artículo o fragmento proporcionado. No utilices conocimientos externos ni supongas preceptos no incluidos en el fragmento.
-2. ESTILO Y ALTERNANCIA: Redacta con rigor jurídico propio de exámenes oficiales del INAP. Alterna entre preguntas directas (ej. «Según el artículo X de la Constitución Española...») y preguntas en negativo (ej. «Conforme al artículo X de la Constitución Española, señale la afirmación INCORRECTA:»).
+2. ESTILO Y ALTERNANCIA: Redacta con rigor jurídico propio de exámenes oficiales. Alterna entre preguntas directas (ej. «Según el artículo X de la Constitución Española...») y preguntas en negativo (ej. «Conforme al artículo X de la Constitución Española, señale la afirmación INCORRECTA:»).
 3. DISTRACTORES PLAUSIBLES: Diseña opciones incorrectas verosímiles empleando trampas clásicas de examen oficial:
    - Alterar plazos, edades o mayorías cercanas (ej. mayoría absoluta por mayoría simple, tres quintos por dos tercios).
-   - Intercambiar órganos o sujetos (ej. Gobierno, Cortes Generales, Congreso, Senado, Rey, Tribunal Constitucional, ley orgánica por ley ordinaria).
+   - Intercambiar órganos o sujetos (ej. Gobierno, Cortes Generales, Congreso, Senado, Rey, Tribunal Constitucional, Alcalde, Pleno, ley orgánica por ley ordinaria).
    - Invertir excepciones, condiciones o matices verbales («podrá» por «deberá», «en todo caso» por «en ningún caso», «salvo» por «incluso»).
 4. HOMOGENEIDAD FORMAL: Las 4 opciones deben mantener una longitud, estructura sintáctica y tono jurídico muy similares entre sí para que ninguna destaque visualmente. No incluyas prefijos como «a)», «b)», «1.» al inicio de cada opción.
 5. LÍMITES ESTRICTOS DE LONGITUD:
@@ -60,6 +70,79 @@ Tu misión es redactar preguntas tipo test oficiales de alta calidad técnica si
    - indice_correcta: entero entre 0 y 3.
    - explicacion: máximo 190 caracteres, citando siempre el artículo exacto de referencia.
 """
+
+
+def sincronizar_suscriptores(
+    bot_token: str,
+    channel_id_principal: str | None,
+    db_path: str = DB_PATH,
+) -> list[str]:
+    """
+    Registra en la tabla `suscriptores` de SQLite a todos los usuarios que hayan pulsado
+    /start o escrito al bot, enviándoles una leyenda de bienvenida la primera vez.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS suscriptores (
+                chat_id TEXT PRIMARY KEY,
+                nombre TEXT,
+                fecha_alta TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        if channel_id_principal and channel_id_principal != "@tu_canal_o_id_numerico_aqui":
+            cursor.execute(
+                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
+                (str(channel_id_principal).strip(), "Administrador"),
+            )
+
+        cursor.execute("SELECT chat_id FROM suscriptores")
+        existentes = {fila[0] for fila in cursor.fetchall()}
+
+        try:
+            url_updates = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+            resp = requests.get(url_updates, timeout=15)
+            datos = resp.json()
+            if resp.ok and datos.get("ok"):
+                for upd in datos.get("result", []):
+                    msg = upd.get("message") or upd.get("my_chat_member") or {}
+                    chat = msg.get("chat", {})
+                    cid = str(chat.get("id", "")).strip()
+                    if not cid:
+                        continue
+                    nombre = (
+                        f"{chat.get('first_name', '')} {chat.get('last_name', '')}".strip()
+                        or chat.get("title")
+                        or chat.get("username")
+                        or "Opositor/a"
+                    )
+                    if cid not in existentes:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
+                            (cid, nombre),
+                        )
+                        existentes.add(cid)
+                        # Enviar mensaje de bienvenida con instrucciones de uso
+                        try:
+                            requests.post(
+                                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                                json={
+                                    "chat_id": cid,
+                                    "text": MENSAJE_BIENVENIDA,
+                                    "parse_mode": "Markdown",
+                                },
+                                timeout=10,
+                            )
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"[Aviso] No se pudieron consultar nuevos suscriptores en getUpdates: {e}")
+
+        conn.commit()
+        cursor.execute("SELECT chat_id FROM suscriptores ORDER BY fecha_alta ASC")
+        return [fila[0] for fila in cursor.fetchall()]
 
 
 def obtener_fragmentos_menos_usados(
@@ -211,7 +294,6 @@ Recuerda ajustar las longitudes: pregunta <= 280 caracteres, cada una de las 4 o
     )
     pregunta_test = PreguntaTest.model_validate_json(response.text)
 
-    # Validar límites de Telegram (300/100/200); si se superan, pedir a Gemini que lo resuma
     intento = 0
     errores = obtener_errores_longitud(pregunta_test)
     while errores and intento < max_reintentos_resumen:
@@ -254,7 +336,7 @@ def enviar_poll_telegram(
     channel_id: str,
     test: PreguntaTest,
 ) -> dict:
-    """Envía la pregunta tipo test a Telegram usando el método sendPoll en modo quiz."""
+    """Envía la pregunta tipo test a un chat o canal de Telegram usando sendPoll en modo quiz."""
     url = f"https://api.telegram.org/bot{bot_token}/sendPoll"
     es_canal_o_grupo = str(channel_id).startswith("-") or str(channel_id).startswith("@")
 
@@ -271,7 +353,7 @@ def enviar_poll_telegram(
     resp = requests.post(url, json=payload, timeout=20)
     datos = resp.json()
     if not resp.ok or not datos.get("ok"):
-        raise RuntimeError(f"Error al enviar Poll a Telegram: {datos}")
+        raise RuntimeError(f"Error al enviar Poll a Telegram ({channel_id}): {datos}")
     return datos
 
 
@@ -324,6 +406,11 @@ def main() -> None:
         )
         sys.exit(1)
 
+    destinatarios = []
+    if bot_token and bot_token != "tu_bot_token_de_telegram_aqui":
+        destinatarios = sincronizar_suscriptores(bot_token, channel_id, DB_PATH)
+        print(f"Suscriptores activos detectados: {len(destinatarios)}")
+
     fragmentos = obtener_fragmentos_menos_usados(NUM_PREGUNTAS_POR_TANDA)
     ejemplos = leer_ejemplos_clase()
     client = genai.Client(api_key=api_key)
@@ -332,7 +419,6 @@ def main() -> None:
     print(f"Generando batería de {total} preguntas tipo test...\n")
 
     for idx, (frag_id, referencia, contenido, veces_usado) in enumerate(fragmentos, start=1):
-        # Alternar preguntas directas y en negativo dentro de la batería de 5
         es_negativa = (idx % 2 == 0)
         pregunta_test = generar_pregunta_con_gemini(
             client=client,
@@ -344,10 +430,15 @@ def main() -> None:
 
         imprimir_resultado_consola(idx, total, frag_id, referencia, veces_usado, pregunta_test)
 
-        if bot_token and channel_id and bot_token != "tu_bot_token_de_telegram_aqui":
-            resultado_tg = enviar_poll_telegram(bot_token, channel_id, pregunta_test)
-            poll_msg_id = resultado_tg.get("result", {}).get("message_id")
-            print(f"✅ Pregunta {idx}/{total} enviada a Telegram (message_id: {poll_msg_id}).\n")
+        if destinatarios:
+            enviados_ok = 0
+            for dest_id in destinatarios:
+                try:
+                    enviar_poll_telegram(bot_token, dest_id, pregunta_test)
+                    enviados_ok += 1
+                except Exception as e:
+                    print(f"[Aviso] No se pudo enviar a {dest_id}: {e}")
+            print(f"✅ Pregunta {idx}/{total} enviada a {enviados_ok}/{len(destinatarios)} suscriptores.\n")
             if idx < total:
                 time.sleep(1.5)
         else:

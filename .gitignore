@@ -1,0 +1,9 @@
+# Entorno virtual y variables secretas
+.venv/
+.env
+__pycache__/
+*.pyc
+
+# Documentos originales del temario (solo se sube temario.db ya procesado)
+*.pdf
+*.docx

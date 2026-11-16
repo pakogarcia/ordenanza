@@ -15,12 +15,12 @@ from pydantic import BaseModel, Field
 DB_PATH = "temario.db"
 EJEMPLOS_PATH = "ejemplos_clase.txt"
 NUM_PREGUNTAS_POR_TANDA = int(os.getenv("NUM_PREGUNTAS", "5"))
-MODEL_NAME = "gemini-2.5-flash"
 FALLBACK_MODELS = [
-    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.6-flash",
     "gemini-3.8-flash",
     "gemini-3.7-flash",
-    "gemini-3.6-flash",
     "gemini-3.5-flash",
 ]
 
@@ -247,7 +247,7 @@ def llamar_gemini(
     contents: str,
     config: types.GenerateContentConfig,
 ):
-    """Llama a Gemini con respaldo automático ante modelos retirados (404) o picos de demanda (503)."""
+    """Llama a Gemini empezando por los modelos más rápidos y cambiando al instante ante 404/429/503/504."""
     ultimo_error = None
     for modelo in FALLBACK_MODELS:
         try:
@@ -258,7 +258,7 @@ def llamar_gemini(
             )
         except (errors.ClientError, errors.ServerError) as e:
             ultimo_error = e
-            if getattr(e, "code", None) in (404, 429, 503):
+            if getattr(e, "code", None) in (404, 429, 503, 504):
                 continue
             raise
     raise ultimo_error
@@ -388,7 +388,6 @@ def debe_enviar_tip_hoy() -> bool:
         return True
     if forzar in ("0", "false", "no"):
         return False
-    # La tanda de las 20:00 h en España se ejecuta a las 19:00 UTC (invierno) / 18:00 UTC (verano)
     hora_utc = datetime.now(timezone.utc).hour
     return hora_utc >= 17
 
@@ -404,7 +403,6 @@ def generar_y_guardar_tip_de_hoy(
     inicializar_tablas_auxiliares(db_path)
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        # Elegir un artículo priorizando aquellos que nunca han tenido un TIP DE HOY
         cursor.execute(
             """
             SELECT f.id, f.referencia, f.contenido, COUNT(t.id) AS num_tips
@@ -484,7 +482,6 @@ def enviar_mensaje_telegram(
         timeout=20,
     )
     if not resp.ok:
-        # Reintentar sin parse_mode por si algún carácter especial de Markdown da conflicto
         requests.post(
             url,
             json={
@@ -580,21 +577,21 @@ def main() -> None:
 
     fragmentos = obtener_fragmentos_menos_usados(NUM_PREGUNTAS_POR_TANDA)
     ejemplos = leer_ejemplos_clase()
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=15000,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
 
     total = len(fragmentos)
     cabecera = construir_cabecera_tanda(fragmentos)
-    print(f"\n{cabecera}\n")
+    print(f"\nGenerando las {total} preguntas antes de enviar a Telegram...\n")
 
-    # 1. Enviar mensaje de cabecera de la tanda (Mejora 2)
-    if destinatarios:
-        for dest_id in destinatarios:
-            try:
-                enviar_mensaje_telegram(bot_token, dest_id, cabecera)
-            except Exception as e:
-                print(f"[Aviso] Error enviando cabecera a {dest_id}: {e}")
-
-    # 2. Generar y enviar las 5 preguntas (la 5.ª como Caso Práctico de Ordenanza - Mejora 4)
+    # 1. Primero generamos las 5 preguntas en memoria (~5 segundos en total)
+    #    para que la cabecera y las 5 preguntas se envíen todas juntas sin espera.
+    preguntas_generadas: list[tuple[int, int, str, int, str, PreguntaTest]] = []
     for idx, (frag_id, referencia, contenido, veces_usado) in enumerate(fragmentos, start=1):
         if idx == total:
             modalidad = "caso_practico"
@@ -610,9 +607,19 @@ def main() -> None:
             ejemplos=ejemplos,
             modalidad=modalidad,
         )
-
         imprimir_resultado_consola(idx, total, modalidad, frag_id, referencia, veces_usado, pregunta_test)
+        preguntas_generadas.append((idx, frag_id, referencia, veces_usado, modalidad, pregunta_test))
 
+    # 2. Una vez listas las 5 preguntas, enviamos cabecera + las 5 encuestas seguidas
+    omitir_cabecera = os.getenv("OMITIR_CABECERA", "").strip() == "1"
+    if destinatarios and not omitir_cabecera:
+        for dest_id in destinatarios:
+            try:
+                enviar_mensaje_telegram(bot_token, dest_id, cabecera)
+            except Exception as e:
+                print(f"[Aviso] Error enviando cabecera a {dest_id}: {e}")
+
+    for idx, frag_id, referencia, veces_usado, modalidad, pregunta_test in preguntas_generadas:
         if destinatarios:
             enviados_ok = 0
             for dest_id in destinatarios:
@@ -621,24 +628,21 @@ def main() -> None:
                     enviados_ok += 1
                 except Exception as e:
                     print(f"[Aviso] No se pudo enviar Poll a {dest_id}: {e}")
-            print(f"✅ Pregunta {idx}/{total} enviada a {enviados_ok}/{len(destinatarios)} suscriptores.\n")
+            print(f"✅ Pregunta {idx}/{total} enviada a {enviados_ok}/{len(destinatarios)} suscriptores.")
             if idx < total:
-                time.sleep(1.5)
-        else:
-            print("ℹ️ Credenciales de Telegram no configuradas; solo se mostró por consola.\n")
-
+                time.sleep(1.0)
         incrementar_uso_fragmento(frag_id)
 
-    # 3. Al final del día (tanda de las 20:00 h o si se fuerza ENVIAR_TIP=1), enviar el TIP DE HOY (Mejora 3)
+    # 3. Al final del día (tanda de las 20:00 h o si se fuerza ENVIAR_TIP=1), enviar el TIP DE HOY
     if debe_enviar_tip_hoy():
-        print("Generando 💡 TIP DE HOY (cierre del día)...")
+        print("\nGenerando 💡 TIP DE HOY (cierre del día)...")
         texto_tip = generar_y_guardar_tip_de_hoy(client=client, db_path=DB_PATH)
         print("\n" + "=" * 72)
         print(texto_tip)
         print("=" * 72 + "\n")
 
         if destinatarios:
-            time.sleep(2.0)
+            time.sleep(1.5)
             for dest_id in destinatarios:
                 try:
                     enviar_mensaje_telegram(bot_token, dest_id, texto_tip)

@@ -2,8 +2,8 @@ name: Enviar Test Oposiciones a Telegram
 
 on:
   schedule:
-    # 3 intentos por franja fuera del minuto :00 (si el primero envía la tanda, los otros dos no duplican)
-    - cron: '5,20,38 8,13,19 * * *'
+    # 3 intentos por franja (09:00, 14:00 y 20:00 hora peninsular española); control antiduplicados en SQLite
+    - cron: '5,25,45 8,13,19 * * *'
   workflow_dispatch:
 
 permissions:

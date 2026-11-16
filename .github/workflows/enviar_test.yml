@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
 
       - name: Configurar Python 3.12
         uses: actions/setup-python@v5
@@ -35,8 +37,8 @@ jobs:
 
       - name: Guardar progreso de temario.db en el repositorio
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "pakogarcia"
+          git config user.email "pako.garcia.tutor@gmail.com"
           git add temario.db
           git diff --staged --quiet || git commit -m "chore: actualizar contador veces_usado en temario.db"
           git push

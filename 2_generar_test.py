@@ -98,6 +98,49 @@ def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tandas_enviadas (
+                clave_tanda TEXT PRIMARY KEY,
+                fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
+
+
+def obtener_clave_tanda_actual() -> str:
+    """Devuelve un identificador único del día y franja actual (ej. '2026-11-16_MEDIODIA')."""
+    ahora = datetime.now(timezone.utc)
+    fecha_str = ahora.strftime("%Y-%m-%d")
+    if ahora.hour < 11:
+        franja = "MANANA"
+    elif ahora.hour < 16:
+        franja = "MEDIODIA"
+    else:
+        franja = "NOCHE"
+    return f"{fecha_str}_{franja}"
+
+
+def tanda_ya_enviada(clave_tanda: str, db_path: str = DB_PATH) -> bool:
+    """Comprueba si la tanda programada de esta franja ya se envió hoy."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM tandas_enviadas WHERE clave_tanda = ?",
+            (clave_tanda,),
+        )
+        return cursor.fetchone() is not None
+
+
+def registrar_tanda_enviada(clave_tanda: str, db_path: str = DB_PATH) -> None:
+    """Registra la tanda actual como enviada para evitar duplicados en reintentos de cron."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR IGNORE INTO tandas_enviadas (clave_tanda) VALUES (?)",
+            (clave_tanda,),
+        )
         conn.commit()
 
 
@@ -569,6 +612,13 @@ def main() -> None:
         sys.exit(1)
 
     inicializar_tablas_auxiliares(DB_PATH)
+    clave_tanda = obtener_clave_tanda_actual()
+
+    # Si es una ejecución programada por cron (GITHUB_EVENT_NAME == 'schedule'),
+    # verificar si esta franja ya fue enviada en un disparo previo para no duplicar.
+    if os.getenv("GITHUB_EVENT_NAME") == "schedule" and tanda_ya_enviada(clave_tanda, DB_PATH):
+        print(f"ℹ️ La tanda '{clave_tanda}' ya fue enviada hoy. Saliendo sin duplicar.")
+        return
 
     destinatarios = []
     if bot_token and bot_token != "tu_bot_token_de_telegram_aqui":
@@ -632,6 +682,8 @@ def main() -> None:
             if idx < total:
                 time.sleep(1.0)
         incrementar_uso_fragmento(frag_id)
+
+    registrar_tanda_enviada(clave_tanda, DB_PATH)
 
     # 3. Al final del día (tanda de las 20:00 h o si se fuerza ENVIAR_TIP=1), enviar el TIP DE HOY
     if debe_enviar_tip_hoy():

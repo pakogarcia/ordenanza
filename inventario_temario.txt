@@ -1,0 +1,39 @@
+============================================================================
+  INVENTARIO DE ARTÍCULOS EN BASE DE DATOS (167 FRAGMENTOS TOTALES)
+============================================================================
+
+📚 Tema1 - Constitucion -> 77 artículos (preguntados al menos 1 vez: 14)
+----------------------------------------------------------------------------
+   Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
+   Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
+   Art. 17, Art. 18, Art. 19, Art. 20, Art. 21, Art. 22, Art. 23, Art. 24
+   Art. 25, Art. 26, Art. 27, Art. 28, Art. 29, Art. 30, Art. 31, Art. 32
+   Art. 33, Art. 34, Art. 35, Art. 36, Art. 37, Art. 38, Art. 39, Art. 40
+   Art. 41, Art. 42, Art. 43, Art. 44, Art. 45, Art. 46, Art. 47, Art. 48
+   Art. 49, Art. 50, Art. 51, Art. 52, Art. 53, Art. 54, Art. 55, Art. 137
+   Art. 138, Art. 139, Art. 140, Art. 141, Art. 142, Art. 143, Art. 144, Art. 145
+   Art. 146, Art. 147, Art. 148, Art. 149, Art. 150, Art. 151, Art. 152, Art. 153
+   Art. 154, Art. 155, Art. 156, Art. 157, Art. 158
+
+📚 Tema2 - Ley - 7 - 1985 -> 72 artículos (preguntados al menos 1 vez: 11)
+----------------------------------------------------------------------------
+   Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
+   Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
+   Art. 17, Art. 18, Art. 19, Art. 20, Art. 21, Art. 22, Art. 23, Art. 24
+   Art. 24 bis, Art. 25, Art. 26, Art. 27, Art. 28, Art. 29, Art. 30, Art. 42
+   Art. 43, Art. 44, Art. 45, Art. 89, Art. 90, Art. 91, Art. 92, Art. 92 bis
+   Art. 93, Art. 94, Art. 95, Art. 96, Art. 97, Art. 98, Art. 99, Art. 100
+   Art. 101, Art. 102, Art. 103, Art. 103 bis, Art. 104, Art. 104 bis, Art. 121, Art. 122
+   Art. 123, Art. 124, Art. 125, Art. 126, Art. 127, Art. 128, Art. 129, Art. 130
+   Art. 131, Art. 132, Art. 133, Art. 134, Art. 135, Art. 136, Art. 137, Art. 138
+
+📚 Tema3 - RD - 2568 -> 5 artículos (preguntados al menos 1 vez: 0)
+----------------------------------------------------------------------------
+   Art. 33, Art. 34, Art. 35, Art. 55, Art. 119
+
+📚 Tema4 - TREBEP -> 13 artículos (preguntados al menos 1 vez: 0)
+----------------------------------------------------------------------------
+   Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
+   Art. 9, Art. 10, Art. 11, Art. 12, Art. 13
+
+============================================================================

@@ -6,6 +6,7 @@ import pymupdf  # fitz
 
 
 DB_PATH = "temario.db"
+INVENTARIO_PATH = "inventario_temario.txt"
 CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
 
@@ -29,22 +30,30 @@ def nombre_tema_desde_archivo(ruta_pdf: str) -> str:
 
 
 def limpiar_texto_paginas(doc: pymupdf.Document) -> str:
-    """Extrae el texto del PDF limpiando encabezados, pies de página y saltos innecesarios."""
+    """Extrae el texto del PDF ordenado visualmente (sort=True) y limpia encabezados y pies."""
     paginas_lineas = []
     posibles_encabezados_pies = {}
 
     for page in doc:
-        lineas = [line.strip() for line in page.get_text("text").splitlines() if line.strip()]
+        # sort=True ordena por coordenadas visuales (arriba a abajo), evitando desorden por cajas/marcos
+        lineas = [
+            line.strip()
+            for line in page.get_text("text", sort=True).splitlines()
+            if line.strip()
+        ]
         paginas_lineas.append(lineas)
         if lineas:
             for candidata in (lineas[0], lineas[-1]):
-                posibles_encabezados_pies[candidata] = posibles_encabezados_pies.get(candidata, 0) + 1
+                posibles_encabezados_pies[candidata] = (
+                    posibles_encabezados_pies.get(candidata, 0) + 1
+                )
 
     umbral_repeticion = max(3, len(doc) // 3)
     encabezados_pies_repetidos = {
         linea
         for linea, cuenta in posibles_encabezados_pies.items()
-        if cuenta >= umbral_repeticion and not re.match(r"^(?:Art[íi]culo|Art\.)\s+\d+", linea, re.IGNORECASE)
+        if cuenta >= umbral_repeticion
+        and not re.match(r"^(?:Art[íi]culo|Art\.)\s+\d+", linea)
     }
 
     patron_paginacion = re.compile(
@@ -53,8 +62,8 @@ def limpiar_texto_paginas(doc: pymupdf.Document) -> str:
     )
     patron_estructura = re.compile(
         r"^(?:T[ÍI]TULO\s+[IVXLCDM0-9]+.*|T[ÍI]TULO\s+PRELIMINAR.*|"
-        r"CAP[ÍI]TULO\s+(?:PRIMERO|SEGUNDO|TERCERO|CUARTO|QUINTO|[IVXLCDM0-9]+).*|"
-        r"Secci[óo]n\s+\d+\.[ªa].*|"
+        r"CAP[ÍI]TULO\s+(?:PRIMERO|SEGUNDO|TERCERO|CUARTO|QUINTO|SEXTO|[IVXLCDM0-9]+).*|"
+        r"Secci[óo]n\s+\d+\.[ªaºo].*|"
         r"De la Organizaci[óo]n Territorial del Estado)$",
         re.IGNORECASE,
     )
@@ -97,33 +106,32 @@ def normalizar_espacios_y_saltos(texto: str) -> str:
 
 def dividir_en_fragmentos(texto: str, nombre_tema: str) -> list[tuple[str, str]]:
     """
-    Divide el texto por artículos (ej. 'Artículo 1.', 'Art. 1', 'Artículo 14') o en bloques
-    de ~1.500 caracteres con solapamiento, anteponiendo el nombre del tema/ley en la referencia.
+    Divide el texto por artículos (tanto si 'Artículo X' va en línea propia como si lleva título
+    seguido en la misma línea, ej. 'Artículo 92 bis. Funcionarios...').
     """
+    # Detecta 'Artículo X' o 'Art. X' (con mayúscula inicial) al comienzo de línea, con o sin título en la misma línea
     patron_articulo = re.compile(
-        r"(?m)^((?:Art[íi]culo|Art\.)\s+\d+(?:\s*(?:bis|ter|quater))?)\.?\s*$",
-        re.IGNORECASE,
+        r"(?m)^((?:Art[íi]culo|Art\.)\s+\d+(?:\s+(?:bis|ter|quater))?)\.?(?=\s|$)"
     )
     coincidencias = list(patron_articulo.finditer(texto))
-
-    if not coincidencias:
-        patron_articulo_inline = re.compile(
-            r"(?m)^((?:Art[íi]culo|Art\.)\s+\d+(?:\s*(?:bis|ter|quater))?)\.?\s+",
-            re.IGNORECASE,
-        )
-        coincidencias = list(patron_articulo_inline.finditer(texto))
 
     fragmentos: list[tuple[str, str]] = []
 
     if coincidencias:
         for i, match in enumerate(coincidencias):
-            ref_bruta = match.group(1).strip()
-            num_match = re.search(r"\d+(?:\s*(?:bis|ter|quater))?", ref_bruta, re.IGNORECASE)
+            ref_bruta = re.sub(r"\s+", " ", match.group(1).strip())
+            num_match = re.search(
+                r"\d+(?:\s+(?:bis|ter|quater))?", ref_bruta, re.IGNORECASE
+            )
             art_str = f"Artículo {num_match.group(0)}" if num_match else ref_bruta
             referencia = f"{nombre_tema} | {art_str}"
 
             inicio_contenido = match.end()
-            fin_contenido = coincidencias[i + 1].start() if i + 1 < len(coincidencias) else len(texto)
+            fin_contenido = (
+                coincidencias[i + 1].start()
+                if i + 1 < len(coincidencias)
+                else len(texto)
+            )
             contenido_bruto = texto[inicio_contenido:fin_contenido]
             contenido = normalizar_espacios_y_saltos(contenido_bruto)
 
@@ -179,7 +187,6 @@ def guardar_en_sqlite_preservando_usos(
             """
         )
 
-        # Recuperar usos previos por referencia (y por artículo simple si venía de la versión monoley)
         cursor.execute("SELECT referencia, veces_usado FROM fragmentos")
         usos_previos = {}
         for ref_existente, veces in cursor.fetchall():
@@ -190,7 +197,9 @@ def guardar_en_sqlite_preservando_usos(
         registros_finales = []
 
         for referencia, contenido in todos_los_fragmentos:
-            art_simple = referencia.split(" | ")[-1] if " | " in referencia else referencia
+            art_simple = (
+                referencia.split(" | ")[-1] if " | " in referencia else referencia
+            )
             if referencia in usos_previos:
                 veces = usos_previos[referencia]
                 actualizados += 1
@@ -212,6 +221,45 @@ def guardar_en_sqlite_preservando_usos(
     return nuevos, actualizados
 
 
+def generar_informe_inventario(db_path: str = DB_PATH) -> str:
+    """Genera un informe detallado por cada tema con la lista exacta de artículos guardados."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, referencia, veces_usado FROM fragmentos ORDER BY id ASC")
+        filas = cursor.fetchall()
+
+    por_tema: dict[str, list[tuple[int, str, int]]] = {}
+    for fid, ref, veces in filas:
+        if " | " in ref:
+            tema, art = ref.split(" | ", 1)
+        else:
+            tema, art = "General", ref
+        por_tema.setdefault(tema, []).append((fid, art, veces))
+
+    lineas = [
+        "=" * 76,
+        f"  INVENTARIO DE ARTÍCULOS EN BASE DE DATOS ({len(filas)} FRAGMENTOS TOTALES)",
+        "=" * 76,
+    ]
+    for tema, items in por_tema.items():
+        lista_arts = [it[1].replace("Artículo ", "Art. ") for it in items]
+        usados = sum(1 for it in items if it[2] > 0)
+        lineas.append(f"\n📚 {tema} -> {len(items)} artículos (preguntados al menos 1 vez: {usados})")
+        lineas.append("-" * 76)
+        # Mostrar en filas de 8 artículos para lectura cómoda
+        for i in range(0, len(lista_arts), 8):
+            bloque = ", ".join(lista_arts[i : i + 8])
+            lineas.append(f"   {bloque}")
+
+    lineas.append("\n" + "=" * 76)
+    informe = "\n".join(lineas)
+
+    with open(INVENTARIO_PATH, "w", encoding="utf-8") as f:
+        f.write(informe + "\n")
+
+    return informe
+
+
 def main() -> None:
     archivos_pdf = obtener_archivos_pdf()
     print(f"Archivos PDF detectados ({len(archivos_pdf)}): {', '.join(archivos_pdf)}\n")
@@ -222,28 +270,19 @@ def main() -> None:
         with pymupdf.open(ruta_pdf) as doc:
             texto_limpio = limpiar_texto_paginas(doc)
         fragmentos_pdf = dividir_en_fragmentos(texto_limpio, nombre_tema)
-        print(f"  - {ruta_pdf} -> {len(fragmentos_pdf)} fragmentos ({nombre_tema})")
+        print(f"  - {ruta_pdf} -> {len(fragmentos_pdf)} artículos detectados ({nombre_tema})")
         todos_los_fragmentos.extend(fragmentos_pdf)
 
     nuevos, conservados = guardar_en_sqlite_preservando_usos(todos_los_fragmentos, DB_PATH)
 
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM fragmentos")
-        total = cursor.fetchone()[0]
-
-        cursor.execute("SELECT id, referencia, contenido, veces_usado FROM fragmentos ORDER BY id LIMIT 3")
-        primeros_tres = cursor.fetchall()
-
     print(
-        f"\nBase de datos '{DB_PATH}' actualizada: {total} fragmentos totales "
-        f"({nuevos} nuevos, {conservados} existentes con su contador conservado).\n"
+        f"\n✅ Base de datos '{DB_PATH}' actualizada: {len(todos_los_fragmentos)} artículos totales "
+        f"({nuevos} nuevos añadidos, {conservados} ya existentes conservando su historial).\n"
     )
-    print("=== EJEMPLO DE LOS 3 PRIMEROS FRAGMENTOS ===")
-    for fila_id, referencia, contenido, veces_usado in primeros_tres:
-        print(f"\n[ID: {fila_id}] Referencia: {referencia} | Veces usado: {veces_usado}")
-        print(f"Contenido:\n{contenido}")
-        print("-" * 60)
+
+    informe = generar_informe_inventario(DB_PATH)
+    print(informe)
+    print(f"\n📄 Se ha guardado también este desglose completo en '{INVENTARIO_PATH}'.")
 
 
 if __name__ == "__main__":

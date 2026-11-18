@@ -172,7 +172,7 @@ def guardar_en_sqlite_preservando_usos(
 ) -> tuple[int, int]:
     """
     Guarda o actualiza los fragmentos en SQLite conservando el contador `veces_usado`
-    de los fragmentos que ya existían en la base de datos.
+    y `fallos_pendientes` de los fragmentos que ya existían en la base de datos.
     """
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
@@ -182,15 +182,28 @@ def guardar_en_sqlite_preservando_usos(
                 id INTEGER PRIMARY KEY,
                 referencia TEXT,
                 contenido TEXT,
-                veces_usado INTEGER DEFAULT 0
+                veces_usado INTEGER DEFAULT 0,
+                fallos_pendientes INTEGER DEFAULT 0
             )
             """
         )
+        # Asegurar que la columna fallos_pendientes exista en bases de datos previas
+        columnas = {
+            info[1] for info in cursor.execute("PRAGMA table_info(fragmentos)").fetchall()
+        }
+        if "fallos_pendientes" not in columnas:
+            cursor.execute(
+                "ALTER TABLE fragmentos ADD COLUMN fallos_pendientes INTEGER DEFAULT 0"
+            )
 
-        cursor.execute("SELECT referencia, veces_usado FROM fragmentos")
+        cursor.execute("SELECT referencia, veces_usado, fallos_pendientes FROM fragmentos")
         usos_previos = {}
-        for ref_existente, veces in cursor.fetchall():
-            usos_previos[ref_existente] = max(usos_previos.get(ref_existente, 0), veces)
+        fallos_previos = {}
+        for ref_existente, veces, fallos in cursor.fetchall():
+            usos_previos[ref_existente] = max(usos_previos.get(ref_existente, 0), veces or 0)
+            fallos_previos[ref_existente] = max(
+                fallos_previos.get(ref_existente, 0), fallos or 0
+            )
 
         nuevos = 0
         actualizados = 0
@@ -202,18 +215,21 @@ def guardar_en_sqlite_preservando_usos(
             )
             if referencia in usos_previos:
                 veces = usos_previos[referencia]
+                fallos = fallos_previos.get(referencia, 0)
                 actualizados += 1
             elif "Tema1" in referencia and art_simple in usos_previos:
                 veces = usos_previos[art_simple]
+                fallos = fallos_previos.get(art_simple, 0)
                 actualizados += 1
             else:
                 veces = 0
+                fallos = 0
                 nuevos += 1
-            registros_finales.append((referencia, contenido, veces))
+            registros_finales.append((referencia, contenido, veces, fallos))
 
         cursor.execute("DELETE FROM fragmentos")
         cursor.executemany(
-            "INSERT INTO fragmentos (referencia, contenido, veces_usado) VALUES (?, ?, ?)",
+            "INSERT INTO fragmentos (referencia, contenido, veces_usado, fallos_pendientes) VALUES (?, ?, ?, ?)",
             registros_finales,
         )
         conn.commit()

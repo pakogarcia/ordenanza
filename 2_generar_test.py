@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 DB_PATH = "temario.db"
 EJEMPLOS_PATH = "ejemplos_clase.txt"
 NUM_PREGUNTAS_POR_TANDA = int(os.getenv("NUM_PREGUNTAS", "5"))
+MAX_REPASOS_POR_TANDA = 2
 FALLBACK_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
@@ -32,8 +33,10 @@ TELEGRAM_MAX_EXPLICACION = 200
 MENSAJE_BIENVENIDA = (
     "👋 ¡Bienvenido/a a *OrdenanzaCordoba* (`@ordenayuncordoba_bot`), "
     "el bot de estudio creado por *Pako García*!\n\n"
-    "✅ Tu suscripción está activa. Recibirás automáticamente una batería de *5 preguntas tipo test* "
-    "en las tres franjas diarias (*09:00, 14:00 y 20:00 h*) y, al cerrar la última tanda de la noche, el *💡 TIP DE HOY*.\n\n"
+    "✅ Tu suscripción está activa. Recibirás automáticamente:\n"
+    "• *5 preguntas tipo test* en cada franja (*09:00, 14:00 y 20:00 h*).\n"
+    "• El *💡 TIP DE HOY* cada noche a las 20:00 h.\n"
+    "• Un *📊 Informe Semanal* los domingos por la noche con tus estadísticas por tema y los artículos que más necesitas repasar (además, los artículos fallados se vuelven a preguntar en días siguientes para afianzarlos).\n\n"
     "🧭 *¿Cómo responder a los tests?*\n"
     "1️⃣ Toca directamente la opción que creas correcta.\n"
     "2️⃣ Si sale *verde (✅)*, has acertado; si sale *roja (❌)*, verás marcada en verde la opción correcta.\n"
@@ -75,9 +78,18 @@ Tu misión es redactar preguntas tipo test oficiales de alta calidad técnica si
 
 
 def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
-    """Asegura que existan las tablas `suscriptores` y `tips_enviados` en SQLite."""
+    """Asegura que existan todas las tablas y columnas necesarias para suscriptores, tips y estadísticas."""
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
+        # Asegurar columna fallos_pendientes en fragmentos
+        columnas = {
+            info[1] for info in cursor.execute("PRAGMA table_info(fragmentos)").fetchall()
+        }
+        if columnas and "fallos_pendientes" not in columnas:
+            cursor.execute(
+                "ALTER TABLE fragmentos ADD COLUMN fallos_pendientes INTEGER DEFAULT 0"
+            )
+
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS suscriptores (
@@ -106,7 +118,51 @@ def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS encuestas_enviadas (
+                poll_id TEXT PRIMARY KEY,
+                chat_id TEXT,
+                fragmento_id INTEGER,
+                tema TEXT,
+                referencia TEXT,
+                indice_correcta INTEGER,
+                fecha_envio TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS respuestas_usuarios (
+                poll_id TEXT,
+                chat_id TEXT,
+                fragmento_id INTEGER,
+                tema TEXT,
+                referencia TEXT,
+                opcion_elegida INTEGER,
+                indice_correcta INTEGER,
+                acertada INTEGER,
+                fecha_respuesta TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (poll_id, chat_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS estado_bot (
+                clave TEXT PRIMARY KEY,
+                valor TEXT
+            )
+            """
+        )
         conn.commit()
+
+
+def extraer_tema_de_referencia(referencia: str) -> str:
+    """Extrae el nombre del tema a partir de la referencia ('Tema1 - Constitucion | Artículo 14')."""
+    if " | " in referencia:
+        return referencia.split(" | ", 1)[0].strip()
+    return "Temario General"
 
 
 def obtener_clave_tanda_actual() -> str:
@@ -134,7 +190,7 @@ def tanda_ya_enviada(clave_tanda: str, db_path: str = DB_PATH) -> bool:
 
 
 def registrar_tanda_enviada(clave_tanda: str, db_path: str = DB_PATH) -> None:
-    """Registra la tanda actual como enviada para evitar duplicados en reintentos de cron."""
+    """Registra la tanda actual como enviada para evitar duplicados."""
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -144,14 +200,142 @@ def registrar_tanda_enviada(clave_tanda: str, db_path: str = DB_PATH) -> None:
         conn.commit()
 
 
+def enviar_mensaje_telegram(
+    bot_token: str,
+    channel_id: str,
+    texto: str,
+) -> None:
+    """Envía un mensaje de texto a un chat o canal de Telegram."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    resp = requests.post(
+        url,
+        json={
+            "chat_id": channel_id,
+            "text": texto,
+            "parse_mode": "Markdown",
+        },
+        timeout=20,
+    )
+    if not resp.ok:
+        requests.post(
+            url,
+            json={
+                "chat_id": channel_id,
+                "text": texto,
+            },
+            timeout=20,
+        )
+
+
+def construir_informe_semanal_usuario(
+    chat_id: str,
+    nombre: str,
+    dias: int = 7,
+    db_path: str = DB_PATH,
+) -> str | None:
+    """
+    Construye el Informe Semanal de rendimiento de un suscriptor:
+    - Total respondidas, aciertos, fallos y % de acierto.
+    - Desglose por cada Tema ordenado de peor a mejor resultado.
+    - Artículos concretos fallados que debe repasar (y que el bot volverá a preguntar).
+    """
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*), SUM(acertada)
+            FROM respuestas_usuarios
+            WHERE chat_id = ?
+              AND fecha_respuesta >= datetime('now', ?)
+            """,
+            (str(chat_id), f"-{dias} days"),
+        )
+        fila_tot = cursor.fetchone()
+        total_resp = fila_tot[0] or 0
+        aciertos = fila_tot[1] or 0
+
+        if total_resp == 0:
+            return None
+
+        fallos = total_resp - aciertos
+        pct_global = round((aciertos / total_resp) * 100, 1)
+
+        cursor.execute(
+            """
+            SELECT tema, COUNT(*) AS tot, SUM(acertada) AS ok
+            FROM respuestas_usuarios
+            WHERE chat_id = ?
+              AND fecha_respuesta >= datetime('now', ?)
+            GROUP BY tema
+            ORDER BY (CAST(SUM(acertada) AS REAL) / COUNT(*)) ASC, tot DESC
+            """,
+            (str(chat_id), f"-{dias} days"),
+        )
+        por_tema = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT DISTINCT referencia
+            FROM respuestas_usuarios
+            WHERE chat_id = ?
+              AND acertada = 0
+              AND fecha_respuesta >= datetime('now', ?)
+            ORDER BY fecha_respuesta DESC
+            LIMIT 12
+            """,
+            (str(chat_id), f"-{dias} days"),
+        )
+        refs_falladas = [r[0] for r in cursor.fetchall()]
+
+    lineas = [
+        f"📊 *INFORME SEMANAL DE ESTUDIO — {nombre}*",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        f"🎯 *Respondidas:* {total_resp} | ✅ *Aciertos:* {aciertos} | ❌ *Fallos:* {fallos} (*{pct_global}%*)",
+        "",
+        "📚 *Rendimiento por Temas (de mayor a menor prioridad de repaso):*",
+    ]
+
+    tema_mas_flojo = None
+    for idx, (tema, tot, ok) in enumerate(por_tema):
+        ok = ok or 0
+        pct = round((ok / tot) * 100, 1)
+        if idx == 0 and pct < 80:
+            tema_mas_flojo = tema
+        if pct >= 80:
+            icono = "🟢"
+        elif pct >= 60:
+            icono = "🟡"
+        else:
+            icono = "🔴"
+        lineas.append(f"  {icono} *{tema}:* {ok}/{tot} aciertos (*{pct}%*)")
+
+    if tema_mas_flojo:
+        lineas.append(f"\n🔎 *Tema que más necesitas reforzar:* _{tema_mas_flojo}_")
+
+    if refs_falladas:
+        lineas.append("\n⚠️ *Artículos fallados esta semana (marcados para volver a preguntarse):*")
+        for ref in refs_falladas:
+            lineas.append(f"  • {ref}")
+    else:
+        lineas.append("\n🏆 *¡Enhorabuena! No has fallado ningún artículo esta semana.*")
+
+    lineas.append(
+        "\n🔄 _Los artículos fallados quedan priorizados en la base de datos para volver a salir en próximas tandas hasta su total asimilación._"
+    )
+    return "\n".join(lineas)
+
+
 def sincronizar_suscriptores(
     bot_token: str,
     channel_id_principal: str | None,
     db_path: str = DB_PATH,
 ) -> list[str]:
     """
-    Registra en la tabla `suscriptores` de SQLite a todos los usuarios que hayan pulsado
-    /start o escrito al bot, enviándoles una leyenda de bienvenida la primera vez.
+    Lee `getUpdates` de Telegram para:
+    1. Dar de alta nuevos suscriptores (/start o respuestas a encuestas).
+    2. Procesar los eventos `poll_answer` registrando aciertos y fallos por tema/artículo
+       y marcando `fallos_pendientes` en los artículos fallados para volver a preguntarlos.
+    3. Responder al comando `/estadisticas` si algún usuario lo solicita.
     """
     inicializar_tablas_auxiliares(db_path)
     with sqlite3.connect(db_path) as conn:
@@ -159,82 +343,239 @@ def sincronizar_suscriptores(
         if channel_id_principal and channel_id_principal != "@tu_canal_o_id_numerico_aqui":
             cursor.execute(
                 "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
-                (str(channel_id_principal).strip(), "Administrador"),
+                (str(channel_id_principal).strip(), "Pako García"),
             )
 
-        cursor.execute("SELECT chat_id FROM suscriptores")
-        existentes = {fila[0] for fila in cursor.fetchall()}
+        cursor.execute("SELECT chat_id, nombre FROM suscriptores")
+        existentes = {fila[0]: fila[1] for fila in cursor.fetchall()}
+
+        cursor.execute("SELECT valor FROM estado_bot WHERE clave = 'ultimo_update_id'")
+        fila_offset = cursor.fetchone()
+        offset = int(fila_offset[0]) + 1 if fila_offset else None
+
+        params = {"timeout": 5}
+        if offset is not None:
+            params["offset"] = offset
+
+        max_update_id = None
+        solicitudes_estadisticas = set()
 
         try:
             url_updates = f"https://api.telegram.org/bot{bot_token}/getUpdates"
-            resp = requests.get(url_updates, timeout=15)
+            resp = requests.get(url_updates, params=params, timeout=15)
             datos = resp.json()
             if resp.ok and datos.get("ok"):
                 for upd in datos.get("result", []):
+                    uid = upd.get("update_id")
+                    if uid is not None:
+                        max_update_id = uid if max_update_id is None else max(max_update_id, uid)
+
+                    # A) Procesar mensajes de texto (/start, /estadisticas, etc.)
                     msg = upd.get("message") or upd.get("my_chat_member") or {}
                     chat = msg.get("chat", {})
                     cid = str(chat.get("id", "")).strip()
-                    if not cid:
-                        continue
-                    nombre = (
-                        f"{chat.get('first_name', '')} {chat.get('last_name', '')}".strip()
-                        or chat.get("title")
-                        or chat.get("username")
-                        or "Opositor/a"
-                    )
-                    if cid not in existentes:
-                        cursor.execute(
-                            "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
-                            (cid, nombre),
+                    texto_msg = (msg.get("text") or "").strip().lower()
+                    if cid:
+                        nombre = (
+                            f"{chat.get('first_name', '')} {chat.get('last_name', '')}".strip()
+                            or chat.get("title")
+                            or chat.get("username")
+                            or "Opositor/a"
                         )
-                        existentes.add(cid)
-                        try:
-                            requests.post(
-                                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                                json={
-                                    "chat_id": cid,
-                                    "text": MENSAJE_BIENVENIDA,
-                                    "parse_mode": "Markdown",
-                                },
-                                timeout=10,
+                        if cid not in existentes:
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
+                                (cid, nombre),
                             )
-                        except Exception:
-                            pass
+                            existentes[cid] = nombre
+                            try:
+                                enviar_mensaje_telegram(bot_token, cid, MENSAJE_BIENVENIDA)
+                            except Exception:
+                                pass
+                        elif nombre != "Opositor/a" and existentes.get(cid) in ("Administrador", "Opositor/a"):
+                            cursor.execute(
+                                "UPDATE suscriptores SET nombre = ? WHERE chat_id = ?",
+                                (nombre, cid),
+                            )
+                            existentes[cid] = nombre
+
+                        if texto_msg.startswith("/estadistica") or texto_msg.startswith("/informe"):
+                            solicitudes_estadisticas.add(cid)
+
+                    # B) Procesar respuestas a encuestas (poll_answer)
+                    poll_ans = upd.get("poll_answer")
+                    if poll_ans:
+                        poll_id = str(poll_ans.get("poll_id", "")).strip()
+                        user_obj = poll_ans.get("user", {})
+                        user_id = str(user_obj.get("id", "")).strip()
+                        option_ids = poll_ans.get("option_ids", [])
+
+                        if user_id and user_id not in existentes:
+                            nombre_u = (
+                                f"{user_obj.get('first_name', '')} {user_obj.get('last_name', '')}".strip()
+                                or user_obj.get("username")
+                                or "Opositor/a"
+                            )
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
+                                (user_id, nombre_u),
+                            )
+                            existentes[user_id] = nombre_u
+
+                        if poll_id and user_id and option_ids:
+                            opcion_elegida = int(option_ids[0])
+                            cursor.execute(
+                                """
+                                SELECT fragmento_id, tema, referencia, indice_correcta
+                                FROM encuestas_enviadas
+                                WHERE poll_id = ?
+                                """,
+                                (poll_id,),
+                            )
+                            enc = cursor.fetchone()
+                            if enc:
+                                frag_id, tema, referencia, indice_correcta = enc
+                                acertada = 1 if opcion_elegida == indice_correcta else 0
+
+                                # Verificar si ya se había procesado esta respuesta
+                                cursor.execute(
+                                    "SELECT 1 FROM respuestas_usuarios WHERE poll_id = ? AND chat_id = ?",
+                                    (poll_id, user_id),
+                                )
+                                if not cursor.fetchone():
+                                    cursor.execute(
+                                        """
+                                        INSERT INTO respuestas_usuarios
+                                        (poll_id, chat_id, fragmento_id, tema, referencia, opcion_elegida, indice_correcta, acertada)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                        """,
+                                        (
+                                            poll_id,
+                                            user_id,
+                                            frag_id,
+                                            tema,
+                                            referencia,
+                                            opcion_elegida,
+                                            indice_correcta,
+                                            acertada,
+                                        ),
+                                    )
+                                    # Actualizar contador de fallos_pendientes en el artículo
+                                    if acertada == 0:
+                                        cursor.execute(
+                                            """
+                                            UPDATE fragmentos
+                                            SET fallos_pendientes = COALESCE(fallos_pendientes, 0) + 1
+                                            WHERE id = ?
+                                            """,
+                                            (frag_id,),
+                                        )
+                                    else:
+                                        cursor.execute(
+                                            """
+                                            UPDATE fragmentos
+                                            SET fallos_pendientes = MAX(0, COALESCE(fallos_pendientes, 0) - 1)
+                                            WHERE id = ?
+                                            """,
+                                            (frag_id,),
+                                        )
+
+                if max_update_id is not None:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO estado_bot (clave, valor) VALUES ('ultimo_update_id', ?)",
+                        (str(max_update_id),),
+                    )
         except Exception as e:
-            print(f"[Aviso] No se pudieron consultar nuevos suscriptores en getUpdates: {e}")
+            print(f"[Aviso] No se pudieron consultar novedades en getUpdates: {e}")
 
         conn.commit()
+
+        # Si algún usuario pidió /estadisticas por chat, enviárselas
+        for cid_est in solicitudes_estadisticas:
+            informe = construir_informe_semanal_usuario(
+                cid_est, existentes.get(cid_est, "Opositor/a"), dias=7, db_path=db_path
+            )
+            if informe:
+                enviar_mensaje_telegram(bot_token, cid_est, informe)
+            else:
+                enviar_mensaje_telegram(
+                    bot_token,
+                    cid_est,
+                    "📊 Aún no hay respuestas registradas en tus últimos 7 días. ¡Responde a las próximas tandas y verás aquí tu análisis por temas!",
+                )
+
         cursor.execute("SELECT chat_id FROM suscriptores ORDER BY fecha_alta ASC")
         return [fila[0] for fila in cursor.fetchall()]
 
 
-def obtener_fragmentos_menos_usados(
+def obtener_fragmentos_para_tanda(
     cantidad: int = NUM_PREGUNTAS_POR_TANDA,
     db_path: str = DB_PATH,
-) -> list[tuple[int, str, str, int]]:
-    """Selecciona `cantidad` fragmentos distintos priorizando los que tienen menor valor en veces_usado."""
+) -> list[tuple[int, str, str, int, bool]]:
+    """
+    Selecciona los fragmentos de la tanda combinando:
+    - Hasta `MAX_REPASOS_POR_TANDA` artículos que tengan `fallos_pendientes > 0`
+      (que no hayan salido en las últimas 10 encuestas, para dejar margen de asimilación).
+    - El resto de preguntas priorizando los artículos con menor `veces_usado`.
+    Devuelve tuplas: (id, referencia, contenido, veces_usado, es_repaso_fallo).
+    """
     if not os.path.exists(db_path):
         raise FileNotFoundError(
             f"No existe la base de datos '{db_path}'. Ejecuta primero 1_procesar_pdf.py."
         )
 
+    seleccionados: list[tuple[int, str, str, int, bool]] = []
+    ids_usados: set[int] = set()
+
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
+        # Evitar repetir artículos que acaben de salir en la última tanda enviada
+        cursor.execute(
+            """
+            SELECT DISTINCT fragmento_id
+            FROM encuestas_enviadas
+            ORDER BY fecha_envio DESC
+            LIMIT 10
+            """
+        )
+        recien_preguntados = {fila[0] for fila in cursor.fetchall() if fila[0] is not None}
+
+        # 1. Buscar hasta MAX_REPASOS_POR_TANDA artículos con fallos pendientes
+        cursor.execute(
+            """
+            SELECT id, referencia, contenido, veces_usado
+            FROM fragmentos
+            WHERE COALESCE(fallos_pendientes, 0) > 0
+            ORDER BY fallos_pendientes DESC, veces_usado ASC, RANDOM()
+            """
+        )
+        for fid, ref, cont, veces in cursor.fetchall():
+            if len(seleccionados) >= min(MAX_REPASOS_POR_TANDA, cantidad):
+                break
+            if fid not in recien_preguntados:
+                seleccionados.append((fid, ref, cont, veces, True))
+                ids_usados.add(fid)
+
+        # 2. Completar hasta `cantidad` con los artículos menos usados
+        faltan = cantidad - len(seleccionados)
         cursor.execute(
             """
             SELECT id, referencia, contenido, veces_usado
             FROM fragmentos
             ORDER BY veces_usado ASC, RANDOM()
-            LIMIT ?
-            """,
-            (cantidad,),
+            """
         )
-        filas = cursor.fetchall()
+        for fid, ref, cont, veces in cursor.fetchall():
+            if len(seleccionados) >= cantidad:
+                break
+            if fid not in ids_usados:
+                seleccionados.append((fid, ref, cont, veces, False))
+                ids_usados.add(fid)
 
-    if not filas:
+    if not seleccionados:
         raise ValueError(f"La tabla 'fragmentos' en '{db_path}' está vacía.")
 
-    return filas
+    return seleccionados
 
 
 def incrementar_uso_fragmento(fragmento_id: int, db_path: str = DB_PATH) -> None:
@@ -244,6 +585,31 @@ def incrementar_uso_fragmento(fragmento_id: int, db_path: str = DB_PATH) -> None
         cursor.execute(
             "UPDATE fragmentos SET veces_usado = veces_usado + 1 WHERE id = ?",
             (fragmento_id,),
+        )
+        conn.commit()
+
+
+def registrar_encuesta_enviada(
+    poll_id: str,
+    chat_id: str,
+    fragmento_id: int,
+    referencia: str,
+    indice_correcta: int,
+    db_path: str = DB_PATH,
+) -> None:
+    """Guarda los metadatos de cada Poll enviado para poder cruzar luego `poll_answer`."""
+    if not poll_id:
+        return
+    tema = extraer_tema_de_referencia(referencia)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO encuestas_enviadas
+            (poll_id, chat_id, fragmento_id, tema, referencia, indice_correcta)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (str(poll_id), str(chat_id), fragmento_id, tema, referencia, indice_correcta),
         )
         conn.commit()
 
@@ -313,25 +679,29 @@ def generar_pregunta_con_gemini(
     contenido: str,
     ejemplos: str,
     modalidad: str = "directa",
+    es_repaso: bool = False,
     max_reintentos_resumen: int = 3,
 ) -> PreguntaTest:
     """
     Genera una pregunta tipo test con Gemini según la modalidad ('directa', 'negativa' o 'caso_practico')
     y valida/resume longitudes si exceden límites.
     """
+    prefijo_repaso = "🔄 [Repaso] " if es_repaso else ""
     if modalidad == "caso_practico":
         instruccion_modalidad = (
             "de SUPUESTO PRÁCTICO breve aplicado a un Ordenanza/Subalterno del Ayuntamiento de Córdoba "
             "(ej. en conserjería, atención a un ciudadano o dependencia municipal surge una duda o situación práctica "
-            "que se resuelve aplicando estrictamente lo dispuesto en este precepto). Empieza el enunciado con '[Caso práctico]'"
+            f"que se resuelve aplicando estrictamente lo dispuesto en este precepto). Empieza el enunciado con '{prefijo_repaso}[Caso práctico]'"
         )
     elif modalidad == "negativa":
         instruccion_modalidad = (
             "en negativo (pidiendo señalar la opción INCORRECTA o falsa respecto al precepto)"
+            + (f", empezando el enunciado con '{prefijo_repaso}'" if es_repaso else "")
         )
     else:
         instruccion_modalidad = (
             "directa (preguntando por la afirmación correcta o literal según el precepto)"
+            + (f", empezando el enunciado con '{prefijo_repaso}'" if es_repaso else "")
         )
 
     bloque_ejemplos = ""
@@ -403,7 +773,9 @@ Texto original de referencia ({referencia}):
     return pregunta_test
 
 
-def construir_cabecera_tanda(fragmentos: list[tuple[int, str, str, int]]) -> str:
+def construir_cabecera_tanda(
+    fragmentos: list[tuple[int, str, str, int, bool]]
+) -> str:
     """Construye el mensaje de cabecera que anuncia la batería de 5 preguntas."""
     hora_utc = datetime.now(timezone.utc).hour
     if hora_utc < 11:
@@ -413,11 +785,21 @@ def construir_cabecera_tanda(fragmentos: list[tuple[int, str, str, int]]) -> str
     else:
         franja = "🌙 TANDA DE NOCHE (20:00 h)"
 
-    referencias = ", ".join(f[1] for f in fragmentos)
+    etiquetas = [
+        f"{ref} 🔄" if es_rep else ref for _, ref, _, _, es_rep in fragmentos
+    ]
+    referencias = ", ".join(etiquetas)
+    num_repasos = sum(1 for *_, es_rep in fragmentos if es_rep)
+    nota_repaso = (
+        f"\n🔄 _Incluye {num_repasos} artículo(s) de refuerzo fallado(s) anteriormente._"
+        if num_repasos > 0
+        else ""
+    )
     return (
         f"📌 *{franja} — {len(fragmentos)} PREGUNTAS*\n"
         f"📚 *Artículos en juego:* {referencias}\n"
         f"🏛️ _Incluye preguntas directas, en negativo y 1 supuesto práctico de Ordenanza._"
+        f"{nota_repaso}"
     )
 
 
@@ -433,6 +815,21 @@ def debe_enviar_tip_hoy() -> bool:
         return False
     hora_utc = datetime.now(timezone.utc).hour
     return hora_utc >= 17
+
+
+def debe_enviar_informe_semanal() -> bool:
+    """
+    Determina si corresponde enviar el Informe Semanal de estudio (domingos en la tanda de noche
+    de las 20:00 h, o si se fuerza con ENVIAR_INFORME_SEMANAL=1).
+    """
+    forzar = os.getenv("ENVIAR_INFORME_SEMANAL", "").strip().lower()
+    if forzar in ("1", "true", "si", "sí", "always"):
+        return True
+    if forzar in ("0", "false", "no"):
+        return False
+    ahora = datetime.now(timezone.utc)
+    # Domingo (weekday == 6) en la tanda de cierre de noche (hora_utc >= 17)
+    return ahora.weekday() == 6 and ahora.hour >= 17
 
 
 def generar_y_guardar_tip_de_hoy(
@@ -508,33 +905,6 @@ INSTRUCCIONES DE FORMATO:
     return texto_tip
 
 
-def enviar_mensaje_telegram(
-    bot_token: str,
-    channel_id: str,
-    texto: str,
-) -> None:
-    """Envía un mensaje de texto a un chat o canal de Telegram."""
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    resp = requests.post(
-        url,
-        json={
-            "chat_id": channel_id,
-            "text": texto,
-            "parse_mode": "Markdown",
-        },
-        timeout=20,
-    )
-    if not resp.ok:
-        requests.post(
-            url,
-            json={
-                "chat_id": channel_id,
-                "text": texto,
-            },
-            timeout=20,
-        )
-
-
 def enviar_poll_telegram(
     bot_token: str,
     channel_id: str,
@@ -565,6 +935,7 @@ def imprimir_resultado_consola(
     num_orden: int,
     total_tanda: int,
     modalidad: str,
+    es_repaso: bool,
     frag_id: int,
     referencia: str,
     veces_usado_previo: int,
@@ -572,8 +943,9 @@ def imprimir_resultado_consola(
 ) -> None:
     """Imprime la pregunta generada formateada por consola para su revisión."""
     letras = ["A", "B", "C", "D"]
+    etiq_repaso = " | REPASO DE FALLO 🔄" if es_repaso else ""
     print("=" * 72)
-    print(f"  PREGUNTA {num_orden}/{total_tanda} [{modalidad.upper()}]")
+    print(f"  PREGUNTA {num_orden}/{total_tanda} [{modalidad.upper()}{etiq_repaso}]")
     print("=" * 72)
     print(
         f"Fragmento seleccionado : ID {frag_id} | {referencia} (usos previos: {veces_usado_previo} -> ahora: {veces_usado_previo + 1})"
@@ -614,8 +986,6 @@ def main() -> None:
     inicializar_tablas_auxiliares(DB_PATH)
     clave_tanda = obtener_clave_tanda_actual()
 
-    # Si es una ejecución programada por cron (GITHUB_EVENT_NAME == 'schedule'),
-    # verificar si esta franja ya fue enviada en un disparo previo para no duplicar.
     if os.getenv("GITHUB_EVENT_NAME") == "schedule" and tanda_ya_enviada(clave_tanda, DB_PATH):
         print(f"ℹ️ La tanda '{clave_tanda}' ya fue enviada hoy. Saliendo sin duplicar.")
         return
@@ -625,7 +995,7 @@ def main() -> None:
         destinatarios = sincronizar_suscriptores(bot_token, channel_id, DB_PATH)
         print(f"Suscriptores activos detectados: {len(destinatarios)}")
 
-    fragmentos = obtener_fragmentos_menos_usados(NUM_PREGUNTAS_POR_TANDA)
+    fragmentos = obtener_fragmentos_para_tanda(NUM_PREGUNTAS_POR_TANDA, DB_PATH)
     ejemplos = leer_ejemplos_clase()
     client = genai.Client(
         api_key=api_key,
@@ -639,10 +1009,11 @@ def main() -> None:
     cabecera = construir_cabecera_tanda(fragmentos)
     print(f"\nGenerando las {total} preguntas antes de enviar a Telegram...\n")
 
-    # 1. Primero generamos las 5 preguntas en memoria (~5 segundos en total)
-    #    para que la cabecera y las 5 preguntas se envíen todas juntas sin espera.
-    preguntas_generadas: list[tuple[int, int, str, int, str, PreguntaTest]] = []
-    for idx, (frag_id, referencia, contenido, veces_usado) in enumerate(fragmentos, start=1):
+    # 1. Generar las 5 preguntas en memoria antes de enviarlas
+    preguntas_generadas: list[tuple[int, int, str, int, str, bool, PreguntaTest]] = []
+    for idx, (frag_id, referencia, contenido, veces_usado, es_repaso) in enumerate(
+        fragmentos, start=1
+    ):
         if idx == total:
             modalidad = "caso_practico"
         elif idx % 2 == 0:
@@ -656,11 +1027,16 @@ def main() -> None:
             contenido=contenido,
             ejemplos=ejemplos,
             modalidad=modalidad,
+            es_repaso=es_repaso,
         )
-        imprimir_resultado_consola(idx, total, modalidad, frag_id, referencia, veces_usado, pregunta_test)
-        preguntas_generadas.append((idx, frag_id, referencia, veces_usado, modalidad, pregunta_test))
+        imprimir_resultado_consola(
+            idx, total, modalidad, es_repaso, frag_id, referencia, veces_usado, pregunta_test
+        )
+        preguntas_generadas.append(
+            (idx, frag_id, referencia, veces_usado, modalidad, es_repaso, pregunta_test)
+        )
 
-    # 2. Una vez listas las 5 preguntas, enviamos cabecera + las 5 encuestas seguidas
+    # 2. Enviar cabecera + las 5 encuestas seguidas y registrar cada poll_id
     omitir_cabecera = os.getenv("OMITIR_CABECERA", "").strip() == "1"
     if destinatarios and not omitir_cabecera:
         for dest_id in destinatarios:
@@ -669,19 +1045,28 @@ def main() -> None:
             except Exception as e:
                 print(f"[Aviso] Error enviando cabecera a {dest_id}: {e}")
 
-    for idx, frag_id, referencia, veces_usado, modalidad, pregunta_test in preguntas_generadas:
+    for idx, frag_id, referencia, veces_usado, modalidad, es_repaso, pregunta_test in preguntas_generadas:
         if destinatarios:
             enviados_ok = 0
             for dest_id in destinatarios:
                 try:
-                    enviar_poll_telegram(bot_token, dest_id, pregunta_test)
+                    res_poll = enviar_poll_telegram(bot_token, dest_id, pregunta_test)
+                    poll_id = res_poll.get("result", {}).get("poll", {}).get("id")
+                    registrar_encuesta_enviada(
+                        poll_id=poll_id,
+                        chat_id=dest_id,
+                        fragmento_id=frag_id,
+                        referencia=referencia,
+                        indice_correcta=pregunta_test.indice_correcta,
+                        db_path=DB_PATH,
+                    )
                     enviados_ok += 1
                 except Exception as e:
                     print(f"[Aviso] No se pudo enviar Poll a {dest_id}: {e}")
             print(f"✅ Pregunta {idx}/{total} enviada a {enviados_ok}/{len(destinatarios)} suscriptores.")
             if idx < total:
                 time.sleep(1.0)
-        incrementar_uso_fragmento(frag_id)
+        incrementar_uso_fragmento(frag_id, DB_PATH)
 
     registrar_tanda_enviada(clave_tanda, DB_PATH)
 
@@ -701,6 +1086,26 @@ def main() -> None:
                 except Exception as e:
                     print(f"[Aviso] Error enviando TIP DE HOY a {dest_id}: {e}")
             print("✅ 💡 TIP DE HOY enviado a todos los suscriptores.")
+
+    # 4. Los domingos por la noche (o si ENVIAR_INFORME_SEMANAL=1), enviar el Informe Semanal a cada usuario
+    if debe_enviar_informe_semanal() and destinatarios:
+        print("\nGenerando y enviando 📊 INFORMES SEMANALES personalizados...")
+        with sqlite3.connect(DB_PATH) as conn:
+            nombres_map = dict(conn.execute("SELECT chat_id, nombre FROM suscriptores").fetchall())
+
+        for dest_id in destinatarios:
+            informe = construir_informe_semanal_usuario(
+                dest_id,
+                nombres_map.get(dest_id, "Opositor/a"),
+                dias=7,
+                db_path=DB_PATH,
+            )
+            if informe:
+                try:
+                    enviar_mensaje_telegram(bot_token, dest_id, informe)
+                    print(f"  ✅ Informe semanal enviado a {dest_id} ({nombres_map.get(dest_id)})")
+                except Exception as e:
+                    print(f"  [Aviso] Error enviando informe semanal a {dest_id}: {e}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 ============================================================================
-  INVENTARIO DE ARTÍCULOS EN BASE DE DATOS (361 FRAGMENTOS TOTALES)
+  INVENTARIO DE ARTÍCULOS EN BASE DE DATOS (405 FRAGMENTOS TOTALES)
 ============================================================================
 
 📚 Tema1 - Constitucion -> 77 artículos (preguntados al menos 1 vez: 21)
@@ -31,10 +31,16 @@
 ----------------------------------------------------------------------------
    Art. 33, Art. 34, Art. 35, Art. 55, Art. 119
 
-📚 Tema4 - TREBEP -> 13 artículos (preguntados al menos 1 vez: 4)
+📚 Tema4 - TREBEP -> 57 artículos (preguntados al menos 1 vez: 4)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
-   Art. 9, Art. 10, Art. 11, Art. 12, Art. 13
+   Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 21, Art. 22, Art. 23
+   Art. 24, Art. 25, Art. 26, Art. 27, Art. 28, Art. 29, Art. 30, Art. 31
+   Art. 32, Art. 39, Art. 41, Art. 42, Art. 46, Art. 47, Art. 47 bis, Art. 48
+   Art. 49, Art. 50, Art. 51, Art. 52, Art. 53, Art. 54, Art. 55, Art. 56
+   Art. 59, Art. 60, Art. 62, Art. 70, Art. 74, Art. 75, Art. 76, Art. 85
+   Art. 86, Art. 87, Art. 88, Art. 89, Art. 90, Art. 91, Art. 92, Art. 95
+   Art. 96
 
 📚 Tema5 - convenio - ayun -> 21 artículos (preguntados al menos 1 vez: 1)
 ----------------------------------------------------------------------------

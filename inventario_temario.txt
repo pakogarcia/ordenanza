@@ -1,8 +1,8 @@
 ============================================================================
-  INVENTARIO DE ARTÍCULOS EN BASE DE DATOS (167 FRAGMENTOS TOTALES)
+  INVENTARIO DE ARTÍCULOS EN BASE DE DATOS (288 FRAGMENTOS TOTALES)
 ============================================================================
 
-📚 Tema1 - Constitucion -> 77 artículos (preguntados al menos 1 vez: 14)
+📚 Tema1 - Constitucion -> 77 artículos (preguntados al menos 1 vez: 21)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
@@ -15,7 +15,7 @@
    Art. 146, Art. 147, Art. 148, Art. 149, Art. 150, Art. 151, Art. 152, Art. 153
    Art. 154, Art. 155, Art. 156, Art. 157, Art. 158
 
-📚 Tema2 - Ley - 7 - 1985 -> 72 artículos (preguntados al menos 1 vez: 11)
+📚 Tema2 - Ley - 7 - 1985 -> 72 artículos (preguntados al menos 1 vez: 22)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
@@ -31,9 +31,38 @@
 ----------------------------------------------------------------------------
    Art. 33, Art. 34, Art. 35, Art. 55, Art. 119
 
-📚 Tema4 - TREBEP -> 13 artículos (preguntados al menos 1 vez: 0)
+📚 Tema4 - TREBEP -> 13 artículos (preguntados al menos 1 vez: 4)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13
+
+📚 Tema5 - convenio - ayun -> 21 artículos (preguntados al menos 1 vez: 1)
+----------------------------------------------------------------------------
+   Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
+   Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
+   Art. 17, Art. 18, Art. 19, Art. 20, Art. 21
+
+📚 Tema6 - Igualdad - 3 - 2007 -> 45 artículos (preguntados al menos 1 vez: 1)
+----------------------------------------------------------------------------
+   Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
+   Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
+   Art. 17, Art. 18, Art. 19, Art. 20, Art. 21, Art. 22, Art. 23, Art. 24
+   Art. 25, Art. 26, Art. 27, Art. 28, Art. 29, Art. 30, Art. 31, Art. 32
+   Art. 33, Art. 34, Art. 35, Art. 55, Art. 56, Art. 57, Art. 58, Art. 59
+   Art. 60, Art. 61, Art. 62, Art. 63, Art. 64
+
+📚 Tema7 - Ley - 12 - 2007 - Igualdad - Andalucia -> 20 artículos (preguntados al menos 1 vez: 0)
+----------------------------------------------------------------------------
+   Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
+   Art. 9, Art. 9 bis, Art. 10, Art. 11, Art. 11 bis, Art. 12, Art. 13, Art. 31
+   Art. 32, Art. 33, Art. 39, Art. 40
+
+📚 Tema8 - Ley - 1 - 2004 - Proteccion - violencia -> 35 artículos (preguntados al menos 1 vez: 1)
+----------------------------------------------------------------------------
+   Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
+   Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
+   Art. 17, Art. 18, Art. 19, Art. 19 bis, Art. 20, Art. 21, Art. 22, Art. 23
+   Art. 24, Art. 25, Art. 26, Art. 27, Art. 28, Art. 28 bis, Art. 28 ter, Art. 29
+   Art. 30, Art. 31, Art. 32
 
 ============================================================================

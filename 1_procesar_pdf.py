@@ -106,12 +106,17 @@ def normalizar_espacios_y_saltos(texto: str) -> str:
 
 def dividir_en_fragmentos(texto: str, nombre_tema: str) -> list[tuple[str, str]]:
     """
-    Divide el texto por artículos (tanto si 'Artículo X' va en línea propia como si lleva título
-    seguido en la misma línea, ej. 'Artículo 92 bis. Funcionarios...').
+    Divide el texto por artículos (tanto si 'Artículo X' va en línea propia, con título en la misma
+    línea, pegado a 'bis'/'ter' como '28bis', o al final de línea tras punto como '. Artículo 9.').
     """
-    # Detecta 'Artículo X' o 'Art. X' (con mayúscula inicial) al comienzo de línea, con o sin título en la misma línea
+    # Insertar salto de línea si un encabezado 'Artículo X.' quedó al final de una línea tras un punto
+    texto = re.sub(
+        r"(?<=\.)\s+((?:Art[íi]culo|Art\.)\s+\d+\s*(?:bis|ter|quater)?\.)(?=\s|$)",
+        r"\n\1",
+        texto,
+    )
     patron_articulo = re.compile(
-        r"(?m)^((?:Art[íi]culo|Art\.)\s+\d+(?:\s+(?:bis|ter|quater))?)\.?(?=\s|$)"
+        r"(?m)^((?:Art[íi]culo|Art\.)\s+\d+\s*(?:bis|ter|quater)?)\.?(?=\s|$)"
     )
     coincidencias = list(patron_articulo.finditer(texto))
 
@@ -121,9 +126,14 @@ def dividir_en_fragmentos(texto: str, nombre_tema: str) -> list[tuple[str, str]]
         for i, match in enumerate(coincidencias):
             ref_bruta = re.sub(r"\s+", " ", match.group(1).strip())
             num_match = re.search(
-                r"\d+(?:\s+(?:bis|ter|quater))?", ref_bruta, re.IGNORECASE
+                r"(\d+)\s*(bis|ter|quater)?", ref_bruta, re.IGNORECASE
             )
-            art_str = f"Artículo {num_match.group(0)}" if num_match else ref_bruta
+            if num_match:
+                num_parte = num_match.group(1)
+                sufijo = f" {num_match.group(2).lower()}" if num_match.group(2) else ""
+                art_str = f"Artículo {num_parte}{sufijo}"
+            else:
+                art_str = ref_bruta
             referencia = f"{nombre_tema} | {art_str}"
 
             inicio_contenido = match.end()

@@ -32,6 +32,11 @@ jobs:
           TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
         run: python 2_generar_test.py
 
+      - name: Ejecutar auditoria de seguridad de BD y usuarios
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python 5_auditoria_seguridad.py
+
       - name: Guardar progreso de temario.db en el repositorio
         run: |
           git config user.name "pakogarcia"

@@ -1,10 +1,14 @@
+import base64
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import random
+import re
 import sqlite3
 import sys
 import time
+from cryptography.fernet import Fernet, InvalidToken
 import requests
 from dotenv import load_dotenv
 from google import genai
@@ -37,10 +41,14 @@ MENSAJE_BIENVENIDA = (
     "• *5 preguntas tipo test* en cada franja (*09:00, 14:00 y 20:00 h*).\n"
     "• El *💡 TIP DE HOY* cada noche a las 20:00 h.\n"
     "• Un *📊 Informe Semanal* los domingos por la noche con tus estadísticas por tema y los artículos que más necesitas repasar (además, los artículos fallados se vuelven a preguntar en días siguientes para afianzarlos).\n\n"
-    "🧭 *¿Cómo responder a los tests?*\n"
-    "1️⃣ Toca directamente la opción que creas correcta.\n"
-    "2️⃣ Si sale *verde (✅)*, has acertado; si sale *roja (❌)*, verás marcada en verde la opción correcta.\n"
-    "3️⃣ Toca el icono de la *bombilla azul (💡)* arriba a la derecha de cada tarjeta para leer la explicación jurídica con el artículo exacto."
+    "🧭 *Comandos útiles:*\n"
+    "• `/estadisticas` — Recibe tu informe acumulado en el siguiente turno.\n"
+    "• `/baja` — Pausar el envío de tests (puedes reactivarlo cuando quieras con `/start`)."
+)
+
+MENSAJE_BAJA = (
+    "🔕 Has pausado tu suscripción en *OrdenanzaCordoba*.\n"
+    "No recibirás más tandas de preguntas. Cuando quieras volver a activarla, solo tienes que pulsar `/start`."
 )
 
 
@@ -77,15 +85,84 @@ Tu misión es redactar preguntas tipo test oficiales de alta calidad técnica si
 """
 
 
+# ============================================================================
+# FUNCIONES DE SEGURIDAD, CIFRADO DE DATOS PERSONALES Y SANEAMIENTO
+# ============================================================================
+
+def _obtener_fernet(secret_seed: str | None = None) -> Fernet | None:
+    """Deriva una clave simétrica AES-128 (Fernet) a partir del token secreto en entorno."""
+    semilla = secret_seed or os.getenv("TELEGRAM_BOT_TOKEN") or ""
+    if not semilla or semilla == "tu_bot_token_de_telegram_aqui":
+        return None
+    digest = hashlib.sha256(semilla.encode("utf-8")).digest()
+    key = base64.urlsafe_b64encode(digest)
+    return Fernet(key)
+
+
+def sanitizar_nombre_usuario(nombre: str) -> str:
+    """Limpia caracteres de control y escapa caracteres especiales de Markdown para prevenir inyección."""
+    if not nombre:
+        return "Opositor/a"
+    limpio = re.sub(r"[\r\n\t\x00-\x1f\x7f]", " ", str(nombre)).strip()
+    limpio = re.sub(r"[*_`\[\]()~>#+=|{}!]", "", limpio)
+    limpio = re.sub(r"\s+", " ", limpio).strip()
+    return (limpio[:60] if limpio else "Opositor/a")
+
+
+def cifrar_nombre(nombre_plano: str, bot_token: str | None = None) -> str:
+    """Cifra el nombre del usuario con AES/Fernet antes de guardarlo en SQLite."""
+    nombre_limpio = sanitizar_nombre_usuario(nombre_plano)
+    if nombre_limpio.startswith("ENC:"):
+        return nombre_limpio
+    f = _obtener_fernet(bot_token)
+    if not f:
+        return nombre_limpio
+    token_cifrado = f.encrypt(nombre_limpio.encode("utf-8")).decode("utf-8")
+    return f"ENC:{token_cifrado}"
+
+
+def descifrar_nombre(valor_guardado: str, bot_token: str | None = None) -> str:
+    """Descifra en memoria el nombre del usuario almacenado en SQLite."""
+    if not valor_guardado:
+        return "Opositor/a"
+    if not str(valor_guardado).startswith("ENC:"):
+        return sanitizar_nombre_usuario(valor_guardado)
+    f = _obtener_fernet(bot_token)
+    if not f:
+        return "Suscriptor Protegido"
+    try:
+        datos = f.decrypt(valor_guardado[4:].encode("utf-8")).decode("utf-8")
+        return sanitizar_nombre_usuario(datos)
+    except (InvalidToken, Exception):
+        return "Suscriptor Protegido"
+
+
+def enmascarar_id(chat_id: str) -> str:
+    """Enmascara el chat_id para no exponer identificadores completos en los logs públicos de CI."""
+    s = str(chat_id).strip()
+    if len(s) <= 4:
+        return "****"
+    return f"***{s[-4:]}"
+
+
+def validar_chat_id(chat_id: str) -> bool:
+    """Valida que un chat_id de Telegram tenga formato seguro (entero con signo opcional o @canal)."""
+    s = str(chat_id).strip()
+    return bool(re.match(r"^(?:-?\d{5,20}|@[A-Za-z0-9_]{5,64})$", s))
+
+
+# ============================================================================
+# GESTIÓN DE BASE DE DATOS Y SUSCRIPTORES
+# ============================================================================
+
 def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
-    """Asegura que existan todas las tablas y columnas necesarias para suscriptores, tips y estadísticas."""
+    """Asegura que existan todas las tablas y columnas necesarias con controles de seguridad."""
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        # Asegurar columna fallos_pendientes en fragmentos
-        columnas = {
+        columnas_frag = {
             info[1] for info in cursor.execute("PRAGMA table_info(fragmentos)").fetchall()
         }
-        if columnas and "fallos_pendientes" not in columnas:
+        if columnas_frag and "fallos_pendientes" not in columnas_frag:
             cursor.execute(
                 "ALTER TABLE fragmentos ADD COLUMN fallos_pendientes INTEGER DEFAULT 0"
             )
@@ -95,10 +172,19 @@ def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
             CREATE TABLE IF NOT EXISTS suscriptores (
                 chat_id TEXT PRIMARY KEY,
                 nombre TEXT,
-                fecha_alta TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                fecha_alta TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                activo INTEGER DEFAULT 1
             )
             """
         )
+        columnas_susc = {
+            info[1] for info in cursor.execute("PRAGMA table_info(suscriptores)").fetchall()
+        }
+        if "activo" not in columnas_susc:
+            cursor.execute(
+                "ALTER TABLE suscriptores ADD COLUMN activo INTEGER DEFAULT 1"
+            )
+
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS tips_enviados (
@@ -155,6 +241,42 @@ def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
             )
             """
         )
+
+        # Purga automática de metadatos de encuestas de más de 60 días (minimización de datos)
+        cursor.execute(
+            "DELETE FROM encuestas_enviadas WHERE fecha_envio < datetime('now', '-60 days')"
+        )
+        conn.commit()
+
+
+def migrar_nombres_a_cifrado(bot_token: str | None = None, db_path: str = DB_PATH) -> int:
+    """Cifra cualquier nombre en texto plano existente en la tabla `suscriptores`."""
+    f = _obtener_fernet(bot_token)
+    if not f:
+        return 0
+    migrados = 0
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT chat_id, nombre FROM suscriptores")
+        for cid, nombre in cursor.fetchall():
+            if nombre and not str(nombre).startswith("ENC:"):
+                cifrado = cifrar_nombre(nombre, bot_token)
+                cursor.execute(
+                    "UPDATE suscriptores SET nombre = ? WHERE chat_id = ?",
+                    (cifrado, cid),
+                )
+                migrados += 1
+        conn.commit()
+    return migrados
+
+
+def desactivar_suscriptor(chat_id: str, db_path: str = DB_PATH) -> None:
+    """Marca un suscriptor como inactivo (activo = 0) cuando solicita /baja o bloquea el bot."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE suscriptores SET activo = 0 WHERE chat_id = ?",
+            (str(chat_id).strip(),),
+        )
         conn.commit()
 
 
@@ -204,8 +326,8 @@ def enviar_mensaje_telegram(
     bot_token: str,
     channel_id: str,
     texto: str,
-) -> None:
-    """Envía un mensaje de texto a un chat o canal de Telegram."""
+) -> bool:
+    """Envía un mensaje de texto a Telegram. Si el usuario bloqueó el bot (403), lo desactiva."""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     resp = requests.post(
         url,
@@ -216,8 +338,11 @@ def enviar_mensaje_telegram(
         },
         timeout=20,
     )
+    if resp.status_code == 403:
+        desactivar_suscriptor(channel_id)
+        return False
     if not resp.ok:
-        requests.post(
+        resp2 = requests.post(
             url,
             json={
                 "chat_id": channel_id,
@@ -225,11 +350,16 @@ def enviar_mensaje_telegram(
             },
             timeout=20,
         )
+        if resp2.status_code == 403:
+            desactivar_suscriptor(channel_id)
+            return False
+        return resp2.ok
+    return True
 
 
 def construir_informe_semanal_usuario(
     chat_id: str,
-    nombre: str,
+    nombre_plano: str,
     dias: int = 7,
     db_path: str = DB_PATH,
 ) -> str | None:
@@ -239,6 +369,7 @@ def construir_informe_semanal_usuario(
     - Desglose por cada Tema ordenado de peor a mejor resultado.
     - Artículos concretos fallados que debe repasar (y que el bot volverá a preguntar).
     """
+    nombre_seguro = sanitizar_nombre_usuario(nombre_plano)
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -288,7 +419,7 @@ def construir_informe_semanal_usuario(
         refs_falladas = [r[0] for r in cursor.fetchall()]
 
     lineas = [
-        f"📊 *INFORME SEMANAL DE ESTUDIO — {nombre}*",
+        f"📊 *INFORME SEMANAL DE ESTUDIO — {nombre_seguro}*",
         "━━━━━━━━━━━━━━━━━━━━━━",
         f"🎯 *Respondidas:* {total_resp} | ✅ *Aciertos:* {aciertos} | ❌ *Fallos:* {fallos} (*{pct_global}%*)",
         "",
@@ -331,23 +462,32 @@ def sincronizar_suscriptores(
     db_path: str = DB_PATH,
 ) -> list[str]:
     """
-    Lee `getUpdates` de Telegram para:
-    1. Dar de alta nuevos suscriptores (/start o respuestas a encuestas).
-    2. Procesar los eventos `poll_answer` registrando aciertos y fallos por tema/artículo
-       y marcando `fallos_pendientes` en los artículos fallados para volver a preguntarlos.
-    3. Responder al comando `/estadisticas` si algún usuario lo solicita.
+    Lee `getUpdates` de Telegram con controles de seguridad:
+    1. Cifra nombres personales en SQLite con AES/Fernet.
+    2. Gestiona altas (/start) y bajas voluntarias (/baja, /stop) o bloqueos del bot.
+    3. Procesa `poll_answer` validando rangos y actualizando `fallos_pendientes`.
     """
     inicializar_tablas_auxiliares(db_path)
+    migrar_nombres_a_cifrado(bot_token, db_path)
+
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        if channel_id_principal and channel_id_principal != "@tu_canal_o_id_numerico_aqui":
+        if (
+            channel_id_principal
+            and channel_id_principal != "@tu_canal_o_id_numerico_aqui"
+            and validar_chat_id(channel_id_principal)
+        ):
+            cid_admin = str(channel_id_principal).strip()
             cursor.execute(
-                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
-                (str(channel_id_principal).strip(), "Pako García"),
+                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre, activo) VALUES (?, ?, 1)",
+                (cid_admin, cifrar_nombre("Pako García", bot_token)),
             )
 
-        cursor.execute("SELECT chat_id, nombre FROM suscriptores")
-        existentes = {fila[0]: fila[1] for fila in cursor.fetchall()}
+        cursor.execute("SELECT chat_id, nombre, COALESCE(activo, 1) FROM suscriptores")
+        existentes = {
+            fila[0]: (descifrar_nombre(fila[1], bot_token), int(fila[2]))
+            for fila in cursor.fetchall()
+        }
 
         cursor.execute("SELECT valor FROM estado_bot WHERE clave = 'ultimo_update_id'")
         fila_offset = cursor.fetchone()
@@ -370,39 +510,74 @@ def sincronizar_suscriptores(
                     if uid is not None:
                         max_update_id = uid if max_update_id is None else max(max_update_id, uid)
 
-                    # A) Procesar mensajes de texto (/start, /estadisticas, etc.)
-                    msg = upd.get("message") or upd.get("my_chat_member") or {}
+                    # A) Procesar cambios de estado de bloqueo del bot (my_chat_member)
+                    chat_member = upd.get("my_chat_member")
+                    if chat_member:
+                        cm_chat = chat_member.get("chat", {})
+                        cm_cid = str(cm_chat.get("id", "")).strip()
+                        nuevo_estado = chat_member.get("new_chat_member", {}).get("status", "")
+                        if validar_chat_id(cm_cid) and nuevo_estado in ("kicked", "left"):
+                            cursor.execute(
+                                "UPDATE suscriptores SET activo = 0 WHERE chat_id = ?",
+                                (cm_cid,),
+                            )
+                            if cm_cid in existentes:
+                                existentes[cm_cid] = (existentes[cm_cid][0], 0)
+
+                    # B) Procesar mensajes de texto (/start, /baja, /estadisticas)
+                    msg = upd.get("message") or {}
                     chat = msg.get("chat", {})
                     cid = str(chat.get("id", "")).strip()
                     texto_msg = (msg.get("text") or "").strip().lower()
-                    if cid:
-                        nombre = (
+                    if cid and validar_chat_id(cid):
+                        nombre_plano = sanitizar_nombre_usuario(
                             f"{chat.get('first_name', '')} {chat.get('last_name', '')}".strip()
                             or chat.get("title")
                             or chat.get("username")
                             or "Opositor/a"
                         )
+                        nombre_cif = cifrar_nombre(nombre_plano, bot_token)
+
+                        if texto_msg in ("/baja", "/stop", "/pausa"):
+                            cursor.execute(
+                                "UPDATE suscriptores SET activo = 0 WHERE chat_id = ?",
+                                (cid,),
+                            )
+                            if cid in existentes:
+                                existentes[cid] = (existentes[cid][0], 0)
+                            enviar_mensaje_telegram(bot_token, cid, MENSAJE_BAJA)
+                            continue
+
                         if cid not in existentes:
                             cursor.execute(
-                                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
-                                (cid, nombre),
+                                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre, activo) VALUES (?, ?, 1)",
+                                (cid, nombre_cif),
                             )
-                            existentes[cid] = nombre
-                            try:
+                            existentes[cid] = (nombre_plano, 1)
+                            enviar_mensaje_telegram(bot_token, cid, MENSAJE_BIENVENIDA)
+                        else:
+                            # Si estaba de baja y envía /start o /alta, reactivar
+                            if existentes[cid][1] == 0 and texto_msg in ("/start", "/alta"):
+                                cursor.execute(
+                                    "UPDATE suscriptores SET activo = 1, nombre = ? WHERE chat_id = ?",
+                                    (nombre_cif, cid),
+                                )
+                                existentes[cid] = (nombre_plano, 1)
                                 enviar_mensaje_telegram(bot_token, cid, MENSAJE_BIENVENIDA)
-                            except Exception:
-                                pass
-                        elif nombre != "Opositor/a" and existentes.get(cid) in ("Administrador", "Opositor/a"):
-                            cursor.execute(
-                                "UPDATE suscriptores SET nombre = ? WHERE chat_id = ?",
-                                (nombre, cid),
-                            )
-                            existentes[cid] = nombre
+                            elif nombre_plano != "Opositor/a" and existentes[cid][0] in (
+                                "Administrador",
+                                "Opositor/a",
+                            ):
+                                cursor.execute(
+                                    "UPDATE suscriptores SET nombre = ? WHERE chat_id = ?",
+                                    (nombre_cif, cid),
+                                )
+                                existentes[cid] = (nombre_plano, existentes[cid][1])
 
                         if texto_msg.startswith("/estadistica") or texto_msg.startswith("/informe"):
                             solicitudes_estadisticas.add(cid)
 
-                    # B) Procesar respuestas a encuestas (poll_answer)
+                    # C) Procesar respuestas a encuestas (poll_answer)
                     poll_ans = upd.get("poll_answer")
                     if poll_ans:
                         poll_id = str(poll_ans.get("poll_id", "")).strip()
@@ -410,19 +585,25 @@ def sincronizar_suscriptores(
                         user_id = str(user_obj.get("id", "")).strip()
                         option_ids = poll_ans.get("option_ids", [])
 
-                        if user_id and user_id not in existentes:
-                            nombre_u = (
+                        if user_id and validar_chat_id(user_id) and user_id not in existentes:
+                            nombre_u = sanitizar_nombre_usuario(
                                 f"{user_obj.get('first_name', '')} {user_obj.get('last_name', '')}".strip()
                                 or user_obj.get("username")
                                 or "Opositor/a"
                             )
                             cursor.execute(
-                                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre) VALUES (?, ?)",
-                                (user_id, nombre_u),
+                                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre, activo) VALUES (?, ?, 1)",
+                                (user_id, cifrar_nombre(nombre_u, bot_token)),
                             )
-                            existentes[user_id] = nombre_u
+                            existentes[user_id] = (nombre_u, 1)
 
-                        if poll_id and user_id and option_ids:
+                        if (
+                            re.match(r"^\d{5,30}$", poll_id)
+                            and validar_chat_id(user_id)
+                            and option_ids
+                            and isinstance(option_ids[0], int)
+                            and 0 <= option_ids[0] <= 3
+                        ):
                             opcion_elegida = int(option_ids[0])
                             cursor.execute(
                                 """
@@ -437,7 +618,6 @@ def sincronizar_suscriptores(
                                 frag_id, tema, referencia, indice_correcta = enc
                                 acertada = 1 if opcion_elegida == indice_correcta else 0
 
-                                # Verificar si ya se había procesado esta respuesta
                                 cursor.execute(
                                     "SELECT 1 FROM respuestas_usuarios WHERE poll_id = ? AND chat_id = ?",
                                     (poll_id, user_id),
@@ -460,7 +640,6 @@ def sincronizar_suscriptores(
                                             acertada,
                                         ),
                                     )
-                                    # Actualizar contador de fallos_pendientes en el artículo
                                     if acertada == 0:
                                         cursor.execute(
                                             """
@@ -486,14 +665,14 @@ def sincronizar_suscriptores(
                         (str(max_update_id),),
                     )
         except Exception as e:
-            print(f"[Aviso] No se pudieron consultar novedades en getUpdates: {e}")
+            print(f"[Aviso] No se pudieron consultar novedades en getUpdates: {type(e).__name__}")
 
         conn.commit()
 
-        # Si algún usuario pidió /estadisticas por chat, enviárselas
         for cid_est in solicitudes_estadisticas:
+            nombre_u = existentes.get(cid_est, ("Opositor/a", 1))[0]
             informe = construir_informe_semanal_usuario(
-                cid_est, existentes.get(cid_est, "Opositor/a"), dias=7, db_path=db_path
+                cid_est, nombre_u, dias=7, db_path=db_path
             )
             if informe:
                 enviar_mensaje_telegram(bot_token, cid_est, informe)
@@ -504,7 +683,9 @@ def sincronizar_suscriptores(
                     "📊 Aún no hay respuestas registradas en tus últimos 7 días. ¡Responde a las próximas tandas y verás aquí tu análisis por temas!",
                 )
 
-        cursor.execute("SELECT chat_id FROM suscriptores ORDER BY fecha_alta ASC")
+        cursor.execute(
+            "SELECT chat_id FROM suscriptores WHERE COALESCE(activo, 1) = 1 ORDER BY fecha_alta ASC"
+        )
         return [fila[0] for fila in cursor.fetchall()]
 
 
@@ -517,7 +698,6 @@ def obtener_fragmentos_para_tanda(
     - Hasta `MAX_REPASOS_POR_TANDA` artículos que tengan `fallos_pendientes > 0`
       (que no hayan salido en las últimas 10 encuestas, para dejar margen de asimilación).
     - El resto de preguntas priorizando los artículos con menor `veces_usado`.
-    Devuelve tuplas: (id, referencia, contenido, veces_usado, es_repaso_fallo).
     """
     if not os.path.exists(db_path):
         raise FileNotFoundError(
@@ -529,7 +709,6 @@ def obtener_fragmentos_para_tanda(
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        # Evitar repetir artículos que acaben de salir en la última tanda enviada
         cursor.execute(
             """
             SELECT DISTINCT fragmento_id
@@ -540,7 +719,6 @@ def obtener_fragmentos_para_tanda(
         )
         recien_preguntados = {fila[0] for fila in cursor.fetchall() if fila[0] is not None}
 
-        # 1. Buscar hasta MAX_REPASOS_POR_TANDA artículos con fallos pendientes
         cursor.execute(
             """
             SELECT id, referencia, contenido, veces_usado
@@ -556,8 +734,6 @@ def obtener_fragmentos_para_tanda(
                 seleccionados.append((fid, ref, cont, veces, True))
                 ids_usados.add(fid)
 
-        # 2. Completar hasta `cantidad` con los artículos menos usados
-        faltan = cantidad - len(seleccionados)
         cursor.execute(
             """
             SELECT id, referencia, contenido, veces_usado
@@ -828,7 +1004,6 @@ def debe_enviar_informe_semanal() -> bool:
     if forzar in ("0", "false", "no"):
         return False
     ahora = datetime.now(timezone.utc)
-    # Domingo (weekday == 6) en la tanda de cierre de noche (hora_utc >= 17)
     return ahora.weekday() == 6 and ahora.hour >= 17
 
 
@@ -925,9 +1100,12 @@ def enviar_poll_telegram(
     }
 
     resp = requests.post(url, json=payload, timeout=20)
+    if resp.status_code == 403:
+        desactivar_suscriptor(channel_id)
+        raise RuntimeError(f"Suscriptor {enmascarar_id(channel_id)} bloqueó el bot (desactivado).")
     datos = resp.json()
     if not resp.ok or not datos.get("ok"):
-        raise RuntimeError(f"Error al enviar Poll a Telegram ({channel_id}): {datos}")
+        raise RuntimeError(f"Error al enviar Poll a {enmascarar_id(channel_id)} (HTTP {resp.status_code})")
     return datos
 
 
@@ -1043,7 +1221,7 @@ def main() -> None:
             try:
                 enviar_mensaje_telegram(bot_token, dest_id, cabecera)
             except Exception as e:
-                print(f"[Aviso] Error enviando cabecera a {dest_id}: {e}")
+                print(f"[Aviso] Error enviando cabecera a {enmascarar_id(dest_id)}: {type(e).__name__}")
 
     for idx, frag_id, referencia, veces_usado, modalidad, es_repaso, pregunta_test in preguntas_generadas:
         if destinatarios:
@@ -1062,7 +1240,7 @@ def main() -> None:
                     )
                     enviados_ok += 1
                 except Exception as e:
-                    print(f"[Aviso] No se pudo enviar Poll a {dest_id}: {e}")
+                    print(f"[Aviso] No se pudo enviar Poll a {enmascarar_id(dest_id)}: {e}")
             print(f"✅ Pregunta {idx}/{total} enviada a {enviados_ok}/{len(destinatarios)} suscriptores.")
             if idx < total:
                 time.sleep(1.0)
@@ -1084,14 +1262,17 @@ def main() -> None:
                 try:
                     enviar_mensaje_telegram(bot_token, dest_id, texto_tip)
                 except Exception as e:
-                    print(f"[Aviso] Error enviando TIP DE HOY a {dest_id}: {e}")
+                    print(f"[Aviso] Error enviando TIP DE HOY a {enmascarar_id(dest_id)}: {type(e).__name__}")
             print("✅ 💡 TIP DE HOY enviado a todos los suscriptores.")
 
     # 4. Los domingos por la noche (o si ENVIAR_INFORME_SEMANAL=1), enviar el Informe Semanal a cada usuario
     if debe_enviar_informe_semanal() and destinatarios:
         print("\nGenerando y enviando 📊 INFORMES SEMANALES personalizados...")
         with sqlite3.connect(DB_PATH) as conn:
-            nombres_map = dict(conn.execute("SELECT chat_id, nombre FROM suscriptores").fetchall())
+            nombres_map = {
+                cid: descifrar_nombre(nom, bot_token)
+                for cid, nom in conn.execute("SELECT chat_id, nombre FROM suscriptores").fetchall()
+            }
 
         for dest_id in destinatarios:
             informe = construir_informe_semanal_usuario(
@@ -1103,9 +1284,9 @@ def main() -> None:
             if informe:
                 try:
                     enviar_mensaje_telegram(bot_token, dest_id, informe)
-                    print(f"  ✅ Informe semanal enviado a {dest_id} ({nombres_map.get(dest_id)})")
+                    print(f"  ✅ Informe semanal enviado a suscriptor {enmascarar_id(dest_id)}")
                 except Exception as e:
-                    print(f"  [Aviso] Error enviando informe semanal a {dest_id}: {e}")
+                    print(f"  [Aviso] Error enviando informe semanal a {enmascarar_id(dest_id)}: {type(e).__name__}")
 
 
 if __name__ == "__main__":

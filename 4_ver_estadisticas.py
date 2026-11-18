@@ -17,7 +17,7 @@ def main() -> None:
     with sqlite3.connect(gen.DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT chat_id, nombre, fecha_alta FROM suscriptores ORDER BY fecha_alta ASC"
+            "SELECT chat_id, nombre, fecha_alta, COALESCE(activo, 1) FROM suscriptores ORDER BY fecha_alta ASC"
         )
         suscriptores = cursor.fetchall()
 
@@ -32,12 +32,14 @@ def main() -> None:
         articulos_marcados = cursor.fetchall()
 
     print("=" * 74)
-    print(f"  ESTADÍSTICAS DE RENDIMIENTO ({len(suscriptores)} SUSCRIPTORES ACTIVOS)")
+    print(f"  ESTADÍSTICAS DE RENDIMIENTO ({len(suscriptores)} SUSCRIPTORES REGISTRADOS)")
     print("=" * 74)
 
-    for cid, nombre, _ in suscriptores:
+    for cid, nombre_cif, _, activo in suscriptores:
+        nombre = gen.descifrar_nombre(nombre_cif, bot_token)
+        estado = "ACTIVO" if activo == 1 else "BAJA"
         informe = gen.construir_informe_semanal_usuario(cid, nombre, dias=7, db_path=gen.DB_PATH)
-        print(f"\n👤 Usuario: {nombre} (ID: {cid})")
+        print(f"\n👤 Usuario: {nombre} (ID: {cid} | {estado})")
         print("-" * 74)
         if informe:
             print(informe)

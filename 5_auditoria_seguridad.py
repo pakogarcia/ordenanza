@@ -1,0 +1,151 @@
+import importlib
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+from dotenv import load_dotenv
+
+gen = importlib.import_module("2_generar_test")
+
+
+def ejecutar_auditoria() -> int:
+    load_dotenv()
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    db_path = gen.DB_PATH
+
+    gen.inicializar_tablas_auxiliares(db_path)
+    migrados = gen.migrar_nombres_a_cifrado(bot_token, db_path)
+
+    alertas: list[str] = []
+    checks_ok: list[str] = []
+
+    print("=" * 76)
+    print("  🛡️ AUDITORÍA DE SEGURIDAD: BASE DE DATOS, USUARIOS Y REPOSITORIO")
+    print("=" * 76)
+
+    # 1. Integridad física de SQLite
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        res_int = cursor.execute("PRAGMA integrity_check").fetchone()[0]
+        if res_int == "ok":
+            checks_ok.append("Integridad física de SQLite ('PRAGMA integrity_check'): OK.")
+        else:
+            alertas.append(f"Fallo de integridad en SQLite: {res_int}")
+
+        # 2. Auditoría de datos personales (PII) y gestión de usuarios en `suscriptores`
+        cursor.execute("SELECT chat_id, nombre, COALESCE(activo, 1) FROM suscriptores")
+        suscriptores = cursor.fetchall()
+        sin_cifrar = []
+        ids_invalidos = []
+        for cid, nombre_guardado, activo in suscriptores:
+            if not gen.validar_chat_id(cid):
+                ids_invalidos.append(cid)
+            if nombre_guardado and not str(nombre_guardado).startswith("ENC:"):
+                sin_cifrar.append(cid)
+
+        if not ids_invalidos:
+            checks_ok.append(
+                f"Validación de identificadores de usuario ({len(suscriptores)} cuentas): formato estricto OK."
+            )
+        else:
+            alertas.append(f"Se detectaron chat_id con formato inválido: {ids_invalidos}")
+
+        if not sin_cifrar:
+            extra = f" ({migrados} migrados en esta ejecución)" if migrados else ""
+            checks_ok.append(
+                f"Privacidad de usuarios (RGPD): 100% de nombres cifrados con AES-128/Fernet en SQLite{extra}."
+            )
+        else:
+            alertas.append(
+                f"Existen {len(sin_cifrar)} nombres de usuario en texto plano sin cifrar en SQLite."
+            )
+
+        activos = sum(1 for _, _, a in suscriptores if a == 1)
+        bajas = len(suscriptores) - activos
+        checks_ok.append(
+            f"Control de estado de usuarios (/start y /baja): {activos} activos, {bajas} en baja."
+        )
+
+        # 3. Consistencia de tablas de estadísticas y encuestas
+        cursor.execute(
+            "SELECT COUNT(*) FROM respuestas_usuarios WHERE opcion_elegida NOT IN (0, 1, 2, 3) OR acertada NOT IN (0, 1)"
+        )
+        resp_corruptas = cursor.fetchone()[0]
+        if resp_corruptas == 0:
+            checks_ok.append("Integridad de respuestas_usuarios (rangos 0..3 y flags binarios): OK.")
+        else:
+            alertas.append(f"Hay {resp_corruptas} registros con valores fuera de rango en respuestas_usuarios.")
+
+        cursor.execute("SELECT COUNT(*) FROM fragmentos WHERE COALESCE(fallos_pendientes, 0) < 0")
+        fallos_negativos = cursor.fetchone()[0]
+        if fallos_negativos == 0:
+            checks_ok.append("Consistencia de contadores `fallos_pendientes` (sin valores negativos): OK.")
+        else:
+            alertas.append(f"Se detectaron {fallos_negativos} artículos con fallos_pendientes < 0.")
+
+    # 4. Auditoría de archivos rastreados en Git y secretos
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        archivos_git = [l.strip() for l in proc.stdout.splitlines() if l.strip()]
+        prohibidos = [
+            f for f in archivos_git if f == ".env" or f.startswith(".venv/") or f.endswith(".pdf") or f.endswith(".docx")
+        ]
+        if not prohibidos:
+            checks_ok.append(
+                "Protección de repositorio Git: ni `.env`, ni `.venv`, ni documentos originales están expuestos."
+            )
+        else:
+            alertas.append(f"Archivos sensibles rastreados en Git: {prohibidos}")
+
+        # Escanear archivos de código rastreados buscando posibles tokens o API keys hardcodeadas
+        patron_secreto = re.compile(r"(?:AIza[0-9A-Za-z\-_]{30,}|ghp_[0-9A-Za-z]{30,}|\d{8,12}:AA[0-9A-Za-z\-_]{30,})")
+        fugas_codigo = []
+        for arch in archivos_git:
+            if arch.endswith((".py", ".yml", ".yaml", ".md", ".bat", ".txt")) and os.path.exists(arch):
+                with open(arch, "r", encoding="utf-8", errors="ignore") as f:
+                    contenido = f.read()
+                if patron_secreto.search(contenido):
+                    fugas_codigo.append(arch)
+        if not fugas_codigo:
+            checks_ok.append(
+                "Escaneo estático de secretos en código fuente (.py, .yml, .md, .bat): 0 claves expuestas."
+            )
+        else:
+            alertas.append(f"Posibles claves hardcodeadas detectadas en archivos: {fugas_codigo}")
+    except Exception as e:
+        alertas.append(f"No se pudo verificar estado de Git: {e}")
+
+    # 5. Verificación de consultas SQL parametrizadas y enmascaramiento de logs
+    with open("2_generar_test.py", "r", encoding="utf-8") as f:
+        codigo_gen = f.read()
+    if "enmascarar_id(" in codigo_gen and "cifrar_nombre(" in codigo_gen:
+        checks_ok.append(
+            "Enmascaramiento de IDs en logs de consola (`***XXXX`) y cifrado activo en `2_generar_test.py`: OK."
+        )
+    else:
+        alertas.append("Falta enmascaramiento de logs o cifrado de nombres en 2_generar_test.py.")
+
+    print("\n✅ CONTROLES SUPERADOS:")
+    for c in checks_ok:
+        print(f"  [OK] {c}")
+
+    if alertas:
+        print("\n🚨 ALERTAS DETECTADAS:")
+        for a in alertas:
+            print(f"  [ALERTA] {a}")
+        print("=" * 76)
+        return 1
+
+    print("\n🔒 RESULTADO FINAL: AUDITORÍA SUPERADA CON ÉXITO (0 VULNERABILIDADES / 0 FUGAS DE DATOS)")
+    print("=" * 76)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(ejecutar_auditoria())

@@ -17,16 +17,20 @@ def main() -> None:
     with sqlite3.connect(gen.DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT chat_id, nombre, fecha_alta FROM suscriptores ORDER BY fecha_alta ASC"
+            "SELECT chat_id, nombre, fecha_alta, COALESCE(activo, 1) FROM suscriptores ORDER BY fecha_alta ASC"
         )
         filas = cursor.fetchall()
 
-    print("=" * 68)
-    print(f"  USUARIOS ACTIVOS EN EL BOT (@ordenayuncordoba_bot): {len(filas)}")
-    print("=" * 68)
-    for idx, (cid, nombre, fecha) in enumerate(filas, start=1):
-        print(f"  {idx}. {nombre:<28} | ID: {cid:<12} | Alta: {fecha}")
-    print("=" * 68)
+    activos = sum(1 for f in filas if f[3] == 1)
+    print("=" * 78)
+    print(f"  USUARIOS EN EL BOT (@ordenayuncordoba_bot): {activos} activos / {len(filas)} totales")
+    print("=" * 78)
+    for idx, (cid, nombre_cif, fecha, activo) in enumerate(filas, start=1):
+        nombre = gen.descifrar_nombre(nombre_cif, bot_token)
+        estado = "✅ ACTIVO" if activo == 1 else "🔕 BAJA"
+        cif_ok = "🔒 AES" if str(nombre_cif).startswith("ENC:") else "⚠️ PLANO"
+        print(f"  {idx}. {nombre:<26} | ID: {cid:<11} | {estado} | {cif_ok} | Alta: {fecha}")
+    print("=" * 78)
 
 
 if __name__ == "__main__":

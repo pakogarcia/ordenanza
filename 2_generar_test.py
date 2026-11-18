@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import secrets
 import sqlite3
 import sys
 import time
@@ -79,9 +80,9 @@ Tu misión es redactar preguntas tipo test oficiales de alta calidad técnica si
 4. HOMOGENEIDAD FORMAL: Las 4 opciones deben mantener una longitud, estructura sintáctica y tono jurídico muy similares entre sí para que ninguna destaque visualmente. No incluyas prefijos como «a)», «b)», «1.» al inicio de cada opción.
 5. LÍMITES ESTRICTOS DE LONGITUD:
    - pregunta: máximo 280 caracteres.
-   - opciones: exactamente 4 textos de máximo 95 caracteres cada uno.
+   - opciones: exactamente 4 textos de máximo 95 caracteres cada uno. No uses opciones tipo «Todas las anteriores son correctas».
    - indice_correcta: entero entre 0 y 3.
-   - explicacion: máximo 190 caracteres, citando siempre el artículo exacto de referencia.
+   - explicacion: máximo 190 caracteres, citando siempre el artículo exacto de referencia. NUNCA menciones letras de opción («La opción A...») en la explicación porque las opciones se barajarán después.
 """
 
 
@@ -949,6 +950,41 @@ Texto original de referencia ({referencia}):
     return pregunta_test
 
 
+def mezclar_opciones_test(
+    test: PreguntaTest,
+    posicion_objetivo: int | None = None,
+) -> PreguntaTest:
+    """
+    Baraja criptográficamente el orden de las 4 opciones en Python para eliminar el sesgo
+    de posición de la IA (que tiende a colocar la respuesta correcta en la opción A) y
+    actualiza `indice_correcta` a la nueva posición real.
+    """
+    rng = secrets.SystemRandom()
+    opciones_originales = list(test.opciones)
+    idx_correcta_orig = test.indice_correcta
+
+    if len(opciones_originales) != 4 or not (0 <= idx_correcta_orig <= 3):
+        return test
+
+    texto_correcto = opciones_originales[idx_correcta_orig]
+    distractores = [
+        op for i, op in enumerate(opciones_originales) if i != idx_correcta_orig
+    ]
+    rng.shuffle(distractores)
+
+    nueva_pos = (
+        posicion_objetivo
+        if posicion_objetivo in (0, 1, 2, 3)
+        else rng.randint(0, 3)
+    )
+    nuevas_opciones = list(distractores)
+    nuevas_opciones.insert(nueva_pos, texto_correcto)
+
+    test.opciones = nuevas_opciones
+    test.indice_correcta = nueva_pos
+    return test
+
+
 def construir_cabecera_tanda(
     fragmentos: list[tuple[int, str, str, int, bool]]
 ) -> str:
@@ -1188,6 +1224,13 @@ def main() -> None:
     print(f"\nGenerando las {total} preguntas antes de enviar a Telegram...\n")
 
     # 1. Generar las 5 preguntas en memoria antes de enviarlas
+    #    Distribuir aleatoriamente las posiciones correctas (A, B, C, D) sin sesgo hacia la A
+    rng = secrets.SystemRandom()
+    bolsa_posiciones = [0, 1, 2, 3]
+    while len(bolsa_posiciones) < total:
+        bolsa_posiciones.append(rng.randint(0, 3))
+    rng.shuffle(bolsa_posiciones)
+
     preguntas_generadas: list[tuple[int, int, str, int, str, bool, PreguntaTest]] = []
     for idx, (frag_id, referencia, contenido, veces_usado, es_repaso) in enumerate(
         fragmentos, start=1
@@ -1206,6 +1249,10 @@ def main() -> None:
             ejemplos=ejemplos,
             modalidad=modalidad,
             es_repaso=es_repaso,
+        )
+        pregunta_test = mezclar_opciones_test(
+            pregunta_test,
+            posicion_objetivo=bolsa_posiciones[idx - 1],
         )
         imprimir_resultado_consola(
             idx, total, modalidad, es_repaso, frag_id, referencia, veces_usado, pregunta_test

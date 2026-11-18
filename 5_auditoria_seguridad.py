@@ -121,7 +121,7 @@ def ejecutar_auditoria() -> int:
     except Exception as e:
         alertas.append(f"No se pudo verificar estado de Git: {e}")
 
-    # 5. Verificación de consultas SQL parametrizadas y enmascaramiento de logs
+    # 5. Verificación de consultas SQL parametrizadas, enmascaramiento de logs y barajado CSPRNG de opciones
     with open("2_generar_test.py", "r", encoding="utf-8") as f:
         codigo_gen = f.read()
     if "enmascarar_id(" in codigo_gen and "cifrar_nombre(" in codigo_gen:
@@ -130,6 +130,13 @@ def ejecutar_auditoria() -> int:
         )
     else:
         alertas.append("Falta enmascaramiento de logs o cifrado de nombres en 2_generar_test.py.")
+
+    if "mezclar_opciones_test(" in codigo_gen and "secrets.SystemRandom()" in codigo_gen:
+        checks_ok.append(
+            "Aleatorización criptográfica (`secrets.SystemRandom`) de opciones A/B/C/D contra sesgo de posición: OK."
+        )
+    else:
+        alertas.append("Falta barajado criptográfico de opciones en 2_generar_test.py.")
 
     print("\n✅ CONTROLES SUPERADOS:")
     for c in checks_ok:

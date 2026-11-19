@@ -153,8 +153,14 @@ def dividir_en_fragmentos(texto: str, nombre_tema: str) -> list[tuple[str, str]]
 
         # Si el apunte está estructurado en bloques temáticos cerrados con 'Idea clave:',
         # cortar preferentemente por cada bloque conceptual completo para no partir ideas a medias.
-        bloques_idea = re.split(r"(?<=Idea clave:[^\n]*)\n+", texto_limpio)
-        bloques_idea = [b.strip() for b in bloques_idea if b.strip()]
+        texto_marcado = re.sub(
+            r"(Idea clave:[^\n]*)(?:\n+|$)",
+            r"\1\n<<<CORTE_BLOQUE>>>\n",
+            texto_limpio,
+        )
+        bloques_idea = [
+            b.strip() for b in texto_marcado.split("<<<CORTE_BLOQUE>>>") if b.strip()
+        ]
 
         if len(bloques_idea) >= 2:
             for bloque in bloques_idea:

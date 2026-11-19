@@ -1,8 +1,8 @@
 ============================================================================
-  INVENTARIO DE ARTÍCULOS EN BASE DE DATOS (405 FRAGMENTOS TOTALES)
+  INVENTARIO DE ARTÍCULOS EN BASE DE DATOS (424 FRAGMENTOS TOTALES)
 ============================================================================
 
-📚 Tema1 - Constitucion -> 77 artículos (preguntados al menos 1 vez: 21)
+📚 Tema1 - Constitucion -> 77 artículos (preguntados al menos 1 vez: 24)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
@@ -15,7 +15,13 @@
    Art. 146, Art. 147, Art. 148, Art. 149, Art. 150, Art. 151, Art. 152, Art. 153
    Art. 154, Art. 155, Art. 156, Art. 157, Art. 158
 
-📚 Tema2 - Ley - 7 - 1985 -> 72 artículos (preguntados al menos 1 vez: 22)
+📚 Tema10 - Relaciones - Administración -> 19 artículos (preguntados al menos 1 vez: 0)
+----------------------------------------------------------------------------
+   Fragmento 1, Fragmento 2, Fragmento 3, Fragmento 4, Fragmento 5, Fragmento 6, Fragmento 7, Fragmento 8
+   Fragmento 9, Fragmento 10, Fragmento 11, Fragmento 12, Fragmento 13, Fragmento 14, Fragmento 15, Fragmento 16
+   Fragmento 17, Fragmento 18, Fragmento 19
+
+📚 Tema2 - Ley - 7 - 1985 -> 72 artículos (preguntados al menos 1 vez: 24)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
@@ -31,7 +37,7 @@
 ----------------------------------------------------------------------------
    Art. 33, Art. 34, Art. 35, Art. 55, Art. 119
 
-📚 Tema4 - TREBEP -> 57 artículos (preguntados al menos 1 vez: 4)
+📚 Tema4 - TREBEP -> 57 artículos (preguntados al menos 1 vez: 6)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 21, Art. 22, Art. 23
@@ -42,13 +48,13 @@
    Art. 86, Art. 87, Art. 88, Art. 89, Art. 90, Art. 91, Art. 92, Art. 95
    Art. 96
 
-📚 Tema5 - convenio - ayun -> 21 artículos (preguntados al menos 1 vez: 1)
+📚 Tema5 - convenio - ayun -> 21 artículos (preguntados al menos 1 vez: 2)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
    Art. 17, Art. 18, Art. 19, Art. 20, Art. 21
 
-📚 Tema6 - Igualdad - 3 - 2007 -> 45 artículos (preguntados al menos 1 vez: 1)
+📚 Tema6 - Igualdad - 3 - 2007 -> 45 artículos (preguntados al menos 1 vez: 3)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
@@ -57,13 +63,13 @@
    Art. 33, Art. 34, Art. 35, Art. 55, Art. 56, Art. 57, Art. 58, Art. 59
    Art. 60, Art. 61, Art. 62, Art. 63, Art. 64
 
-📚 Tema7 - Ley - 12 - 2007 - Igualdad - Andalucia -> 20 artículos (preguntados al menos 1 vez: 0)
+📚 Tema7 - Ley - 12 - 2007 - Igualdad - Andalucia -> 20 artículos (preguntados al menos 1 vez: 1)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 9 bis, Art. 10, Art. 11, Art. 11 bis, Art. 12, Art. 13, Art. 31
    Art. 32, Art. 33, Art. 39, Art. 40
 
-📚 Tema8 - Ley - 1 - 2004 - Proteccion - violencia -> 35 artículos (preguntados al menos 1 vez: 1)
+📚 Tema8 - Ley - 1 - 2004 - Proteccion - violencia -> 35 artículos (preguntados al menos 1 vez: 2)
 ----------------------------------------------------------------------------
    Art. 1, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7, Art. 8
    Art. 9, Art. 10, Art. 11, Art. 12, Art. 13, Art. 14, Art. 15, Art. 16
@@ -71,7 +77,7 @@
    Art. 24, Art. 25, Art. 26, Art. 27, Art. 28, Art. 28 bis, Art. 28 ter, Art. 29
    Art. 30, Art. 31, Art. 32
 
-📚 Tema9 - Ley - 13 - 2007 - medidas - protencion -> 73 artículos (preguntados al menos 1 vez: 0)
+📚 Tema9 - Ley - 13 - 2007 - medidas - protencion -> 73 artículos (preguntados al menos 1 vez: 3)
 ----------------------------------------------------------------------------
    Art. 1, Art. 1 bis, Art. 2, Art. 3, Art. 4, Art. 5, Art. 6, Art. 7
    Art. 7 bis, Art. 8, Art. 9, Art. 10, Art. 10 bis, Art. 11, Art. 12, Art. 13

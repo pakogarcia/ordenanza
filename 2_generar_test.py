@@ -889,24 +889,49 @@ def generar_pregunta_con_gemini(
     Genera una pregunta tipo test con Gemini según la modalidad ('directa', 'negativa' o 'caso_practico')
     y valida/resume longitudes si exceden límites.
     """
+    es_conceptual = "fragmento" in referencia.lower()
+    tema_limpio = extraer_tema_de_referencia(referencia)
     contexto_normativo = formatear_contexto_normativo(referencia)
     prefijo_repaso = "🔄 [Repaso] " if es_repaso else ""
-    if modalidad == "caso_practico":
-        instruccion_modalidad = (
-            "de SUPUESTO PRÁCTICO sencillo y realista aplicado a un Ordenanza del Ayuntamiento de Córdoba "
-            f"(citando expresamente {contexto_normativo} para resolver una duda cotidiana en conserjería o atención al ciudadano). "
-            f"Empieza el enunciado con '{prefijo_repaso}[Caso práctico]'"
-        )
-    elif modalidad == "negativa":
-        instruccion_modalidad = (
-            f"en negativo, empezando obligatoriamente con '{prefijo_repaso}Según el {contexto_normativo}, señale la afirmación INCORRECTA sobre [indica brevemente de qué trata el artículo]:'. "
-            "Haz que la opción incorrecta contenga un error claro y evidente frente al texto literal, sin retorcer el lenguaje"
-        )
+
+    if es_conceptual:
+        if modalidad == "caso_practico":
+            instruccion_modalidad = (
+                "de SUPUESTO PRÁCTICO sencillo y realista aplicado a un Ordenanza del Ayuntamiento de Córdoba "
+                f"(en materia de '{tema_limpio}', resolviendo una situación cotidiana en conserjería, registro o atención al ciudadano "
+                "según las reglas del texto). NUNCA escribas la palabra 'Fragmento' en el enunciado ni en la explicación. "
+                f"Empieza el enunciado con '{prefijo_repaso}[Caso práctico]'"
+            )
+        elif modalidad == "negativa":
+            instruccion_modalidad = (
+                "en negativo, empezando situando claramente la materia o concepto concreto del texto "
+                "(ej. 'En materia de atención al ciudadano...', 'Respecto a las notificaciones electrónicas...', 'Sobre el derecho de petición...'), "
+                "seguido de 'señale la afirmación INCORRECTA:'. NUNCA escribas 'Fragmento X'. "
+                "Haz que la opción incorrecta contenga un error claro y evidente frente al texto"
+            )
+        else:
+            instruccion_modalidad = (
+                "directa y clara de nivel Ordenanza, empezando situando claramente el concepto o materia concreta del texto "
+                "(ej. 'En materia de atención al ciudadano...', 'Sobre los bucles de inducción magnética...', 'Respecto a la notificación en papel...'). "
+                "NUNCA menciones 'Fragmento X'. Pregunta por un dato clave, plazo, clasificación o regla práctica del texto con opciones breves"
+            )
     else:
-        instruccion_modalidad = (
-            f"directa y clara de nivel Ordenanza, empezando obligatoriamente situando la norma y artículo (ej. '{prefijo_repaso}Según el {contexto_normativo}, ...'). "
-            "Pregunta por la idea principal o dato clave del artículo con opciones breves y claras"
-        )
+        if modalidad == "caso_practico":
+            instruccion_modalidad = (
+                "de SUPUESTO PRÁCTICO sencillo y realista aplicado a un Ordenanza del Ayuntamiento de Córdoba "
+                f"(citando expresamente {contexto_normativo} para resolver una duda cotidiana en conserjería o atención al ciudadano). "
+                f"Empieza el enunciado con '{prefijo_repaso}[Caso práctico]'"
+            )
+        elif modalidad == "negativa":
+            instruccion_modalidad = (
+                f"en negativo, empezando obligatoriamente con '{prefijo_repaso}Según el {contexto_normativo}, señale la afirmación INCORRECTA sobre [indica brevemente de qué trata el artículo]:'. "
+                "Haz que la opción incorrecta contenga un error claro y evidente frente al texto literal, sin retorcer el lenguaje"
+            )
+        else:
+            instruccion_modalidad = (
+                f"directa y clara de nivel Ordenanza, empezando obligatoriamente situando la norma y artículo (ej. '{prefijo_repaso}Según el {contexto_normativo}, ...'). "
+                "Pregunta por la idea principal o dato clave del artículo con opciones breves y claras"
+            )
 
     bloque_ejemplos = ""
     if ejemplos:
@@ -915,9 +940,20 @@ def generar_pregunta_con_gemini(
             f"\"\"\"\n{ejemplos}\n\"\"\"\n"
         )
 
-    prompt = f"""Genera una pregunta tipo test de oposición de ORDENANZA (Agrupación Profesional) a partir del siguiente precepto:
+    etiqueta_origen = (
+        f"MATERIA / TEMARIO DE APUNTES: {tema_limpio} (temario conceptual sin numeración de artículo; NO escribas 'Fragmento')"
+        if es_conceptual
+        else f"NORMA Y ARTÍCULO: {contexto_normativo}"
+    )
+    regla_cita = (
+        f"citando la materia/norma concreta mencionada en el texto (NUNCA escribas 'Fragmento')"
+        if es_conceptual
+        else f"citando '{contexto_normativo}'"
+    )
 
-NORMA Y ARTÍCULO: {contexto_normativo}
+    prompt = f"""Genera una pregunta tipo test de oposición de ORDENANZA (Agrupación Profesional) a partir del siguiente texto del temario:
+
+{etiqueta_origen}
 TEXTO LITERAL:
 \"\"\"
 {contenido}
@@ -925,9 +961,9 @@ TEXTO LITERAL:
 {bloque_ejemplos}
 MODALIDAD REQUERIDA EN ESTE TURNO: Redacta una pregunta {instruccion_modalidad}.
 Recuerda:
-- Empieza SIEMPRE situando claramente la norma ({contexto_normativo}) y el tema del artículo en el enunciado.
+- Empieza SIEMPRE situando claramente el tema, concepto o norma en el enunciado para que el opositor sepa de qué se habla.
 - Nivel accesible y práctico de Ordenanza (evita preguntas oscuras o rebuscadas).
-- Longitudes: pregunta <= 280 caracteres, cada una de las 4 opciones <= 95 caracteres (preferiblemente cortas y claras), explicacion <= 190 caracteres citando '{contexto_normativo}' sin mencionar letras A/B/C/D."""
+- Longitudes: pregunta <= 280 caracteres, cada una de las 4 opciones <= 95 caracteres (preferiblemente cortas y claras), explicacion <= 190 caracteres {regla_cita} y sin mencionar letras A/B/C/D."""
 
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,

@@ -149,29 +149,60 @@ def dividir_en_fragmentos(texto: str, nombre_tema: str) -> list[tuple[str, str]]
                 fragmentos.append((referencia, contenido))
     else:
         texto_limpio = normalizar_espacios_y_saltos(texto)
-        inicio = 0
         num_frag = 1
-        longitud = len(texto_limpio)
 
-        while inicio < longitud:
-            fin = min(inicio + CHUNK_SIZE, longitud)
-            if fin < longitud:
-                ultimo_corte = max(
-                    texto_limpio.rfind(". ", inicio + CHUNK_SIZE // 2, fin),
-                    texto_limpio.rfind("\n", inicio + CHUNK_SIZE // 2, fin),
-                )
-                if ultimo_corte != -1:
-                    fin = ultimo_corte + 1
+        # Si el apunte está estructurado en bloques temáticos cerrados con 'Idea clave:',
+        # cortar preferentemente por cada bloque conceptual completo para no partir ideas a medias.
+        bloques_idea = re.split(r"(?<=Idea clave:[^\n]*)\n+", texto_limpio)
+        bloques_idea = [b.strip() for b in bloques_idea if b.strip()]
 
-            fragmento = texto_limpio[inicio:fin].strip()
-            if fragmento:
-                referencia = f"{nombre_tema} | Fragmento {num_frag}"
-                fragmentos.append((referencia, fragmento))
-                num_frag += 1
+        if len(bloques_idea) >= 2:
+            for bloque in bloques_idea:
+                if len(bloque) <= 2200:
+                    fragmentos.append((f"{nombre_tema} | Fragmento {num_frag}", bloque))
+                    num_frag += 1
+                else:
+                    inicio = 0
+                    long_b = len(bloque)
+                    while inicio < long_b:
+                        fin = min(inicio + CHUNK_SIZE, long_b)
+                        if fin < long_b:
+                            ultimo_corte = max(
+                                bloque.rfind(". ", inicio + CHUNK_SIZE // 2, fin),
+                                bloque.rfind("\n", inicio + CHUNK_SIZE // 2, fin),
+                            )
+                            if ultimo_corte != -1:
+                                fin = ultimo_corte + 1
+                        trozo = bloque[inicio:fin].strip()
+                        if trozo:
+                            fragmentos.append((f"{nombre_tema} | Fragmento {num_frag}", trozo))
+                            num_frag += 1
+                        if fin >= long_b:
+                            break
+                        inicio = max(inicio + 1, fin - CHUNK_OVERLAP)
+        else:
+            inicio = 0
+            longitud = len(texto_limpio)
 
-            if fin >= longitud:
-                break
-            inicio = max(inicio + 1, fin - CHUNK_OVERLAP)
+            while inicio < longitud:
+                fin = min(inicio + CHUNK_SIZE, longitud)
+                if fin < longitud:
+                    ultimo_corte = max(
+                        texto_limpio.rfind(". ", inicio + CHUNK_SIZE // 2, fin),
+                        texto_limpio.rfind("\n", inicio + CHUNK_SIZE // 2, fin),
+                    )
+                    if ultimo_corte != -1:
+                        fin = ultimo_corte + 1
+
+                fragmento = texto_limpio[inicio:fin].strip()
+                if fragmento:
+                    referencia = f"{nombre_tema} | Fragmento {num_frag}"
+                    fragmentos.append((referencia, fragmento))
+                    num_frag += 1
+
+                if fin >= longitud:
+                    break
+                inicio = max(inicio + 1, fin - CHUNK_OVERLAP)
 
     return fragmentos
 

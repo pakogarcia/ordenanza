@@ -68,21 +68,21 @@ class PreguntaTest(BaseModel):
     )
 
 
-SYSTEM_INSTRUCTION = """Eres un vocal experto de un Tribunal Calificador de oposiciones de la Administración General del Estado (AGE) y de Ordenanza/Subalterno del Ayuntamiento de Córdoba.
-Tu misión es redactar preguntas tipo test oficiales de alta calidad técnica siguiendo estas reglas estrictas:
+SYSTEM_INSTRUCTION = """Eres miembro de un Tribunal Calificador de oposiciones de ORDENANZA / SUBALTERNO del Ayuntamiento de Córdoba (Agrupación Profesional - sin titulación universitaria).
+Tu misión es redactar preguntas tipo test CLARAS, DIRECTAS y AJUSTADAS AL NIVEL REAL DE ORDENANZA siguiendo estas reglas estrictas:
 
-1. LITERALIDAD NORMATIVA: Básate única y exclusivamente en el texto literal del artículo o fragmento proporcionado. No utilices conocimientos externos ni supongas preceptos no incluidos en el fragmento.
-2. ESTILO Y ALTERNANCIA: Redacta con rigor jurídico propio de exámenes oficiales. Alterna según se te pida entre preguntas directas, preguntas en negativo («Señale la afirmación INCORRECTA») y supuestos prácticos aplicados a un Ordenanza del Ayuntamiento de Córdoba.
-3. DISTRACTORES PLAUSIBLES: Diseña opciones incorrectas verosímiles empleando trampas clásicas de examen oficial:
-   - Alterar plazos, edades o mayorías cercanas (ej. mayoría absoluta por mayoría simple, tres quintos por dos tercios).
-   - Intercambiar órganos o sujetos (ej. Gobierno, Cortes Generales, Congreso, Senado, Rey, Tribunal Constitucional, Alcalde, Pleno, ley orgánica por ley ordinaria).
-   - Invertir excepciones, condiciones o matices verbales («podrá» por «deberá», «en todo caso» por «en ningún caso», «salvo» por «incluso»).
-4. HOMOGENEIDAD FORMAL: Las 4 opciones deben mantener una longitud, estructura sintáctica y tono jurídico muy similares entre sí para que ninguna destaque visualmente. No incluyas prefijos como «a)», «b)», «1.» al inicio de cada opción.
+1. CONTEXTO OBLIGATORIO EN EL ENUNCIADO: Empieza SIEMPRE el enunciado situando claramente al opositor en la norma y el artículo (por ejemplo: «Según el art. 14 de la Constitución Española...», «Conforme al art. 8 de la Ley 7/1985 (LBRL)...», «Según el art. 5 del Convenio del Ayto. de Córdoba...»). NUNCA redactes preguntas genéricas o ambiguas sin decir a qué ley o materia se refieren.
+2. NIVEL ORDENANZA (AGRUPACIÓN PROFESIONAL): Pregunta por las IDEAS PRINCIPALES y conceptos troncales del artículo (definiciones básicas, órganos principales, plazos clave, derechos fundamentales, competencias claras, quién aprueba o preside algo). Evita tecnicismos enrevesados o matices propios de Técnico Superior (A1/A2).
+3. LITERALIDAD Y CLARIDAD: Básate estrictamente en el texto literal del artículo proporcionado, redactando con lenguaje administrativo claro, directo y fácil de leer en un teléfono móvil.
+4. OPCIONES CLARAS Y CONCISAS:
+   - Diseña 4 opciones breves, concretas y de longitud parecida (preferiblemente entre 30 y 75 caracteres cada una; nunca más de 95).
+   - Los 3 distractores deben ser plausibles pero claramente distinguibles para quien haya estudiado el artículo (cambiando un órgano, un plazo o un concepto clave, sin retorcer la gramática).
+   - No incluyas prefijos como «a)», «b)», «1.» ni uses «Todas las anteriores son correctas».
 5. LÍMITES ESTRICTOS DE LONGITUD:
    - pregunta: máximo 280 caracteres.
-   - opciones: exactamente 4 textos de máximo 95 caracteres cada uno. No uses opciones tipo «Todas las anteriores son correctas».
+   - opciones: exactamente 4 textos de máximo 95 caracteres cada uno.
    - indice_correcta: entero entre 0 y 3.
-   - explicacion: máximo 190 caracteres, citando siempre el artículo exacto de referencia. NUNCA menciones letras de opción («La opción A...») en la explicación porque las opciones se barajarán después.
+   - explicacion: máximo 190 caracteres, citando siempre la norma y el artículo exacto. NUNCA menciones letras de opción («La opción A...») porque las opciones se barajarán después.
 """
 
 
@@ -286,6 +286,32 @@ def extraer_tema_de_referencia(referencia: str) -> str:
     if " | " in referencia:
         return referencia.split(" | ", 1)[0].strip()
     return "Temario General"
+
+
+def formatear_contexto_normativo(referencia: str) -> str:
+    """Convierte una referencia interna ('Tema2 - Ley - 7 - 1985 | Artículo 8') en nombre jurídico claro."""
+    tema = extraer_tema_de_referencia(referencia)
+    articulo = referencia.split(" | ", 1)[1].strip() if " | " in referencia else referencia
+    t_low = tema.lower()
+    if "constitucion" in t_low:
+        norma = "la Constitución Española"
+    elif "7 - 1985" in t_low or "7-1985" in t_low:
+        norma = "la Ley 7/1985 de Bases del Régimen Local (LBRL)"
+    elif "2568" in t_low:
+        norma = "el RD 2568/1986 (ROF)"
+    elif "trebep" in t_low:
+        norma = "el TREBEP (Estatuto Básico del Empleado Público)"
+    elif "convenio" in t_low:
+        norma = "el Convenio Colectivo del Ayuntamiento de Córdoba"
+    elif "3 - 2007" in t_low or "3-2007" in t_low:
+        norma = "la Ley Orgánica 3/2007 de Igualdad"
+    elif "12 - 2007" in t_low or "12-2007" in t_low:
+        norma = "la Ley 12/2007 de Igualdad de Andalucía"
+    elif "1 - 2004" in t_low or "1-2004" in t_low:
+        norma = "la Ley Orgánica 1/2004 contra la Violencia de Género"
+    else:
+        norma = tema
+    return f"{articulo} de {norma}"
 
 
 def obtener_clave_tanda_actual() -> str:
@@ -863,22 +889,23 @@ def generar_pregunta_con_gemini(
     Genera una pregunta tipo test con Gemini según la modalidad ('directa', 'negativa' o 'caso_practico')
     y valida/resume longitudes si exceden límites.
     """
+    contexto_normativo = formatear_contexto_normativo(referencia)
     prefijo_repaso = "🔄 [Repaso] " if es_repaso else ""
     if modalidad == "caso_practico":
         instruccion_modalidad = (
-            "de SUPUESTO PRÁCTICO breve aplicado a un Ordenanza/Subalterno del Ayuntamiento de Córdoba "
-            "(ej. en conserjería, atención a un ciudadano o dependencia municipal surge una duda o situación práctica "
-            f"que se resuelve aplicando estrictamente lo dispuesto en este precepto). Empieza el enunciado con '{prefijo_repaso}[Caso práctico]'"
+            "de SUPUESTO PRÁCTICO sencillo y realista aplicado a un Ordenanza del Ayuntamiento de Córdoba "
+            f"(citando expresamente {contexto_normativo} para resolver una duda cotidiana en conserjería o atención al ciudadano). "
+            f"Empieza el enunciado con '{prefijo_repaso}[Caso práctico]'"
         )
     elif modalidad == "negativa":
         instruccion_modalidad = (
-            "en negativo (pidiendo señalar la opción INCORRECTA o falsa respecto al precepto)"
-            + (f", empezando el enunciado con '{prefijo_repaso}'" if es_repaso else "")
+            f"en negativo, empezando obligatoriamente con '{prefijo_repaso}Según el {contexto_normativo}, señale la afirmación INCORRECTA sobre [indica brevemente de qué trata el artículo]:'. "
+            "Haz que la opción incorrecta contenga un error claro y evidente frente al texto literal, sin retorcer el lenguaje"
         )
     else:
         instruccion_modalidad = (
-            "directa (preguntando por la afirmación correcta o literal según el precepto)"
-            + (f", empezando el enunciado con '{prefijo_repaso}'" if es_repaso else "")
+            f"directa y clara de nivel Ordenanza, empezando obligatoriamente situando la norma y artículo (ej. '{prefijo_repaso}Según el {contexto_normativo}, ...'). "
+            "Pregunta por la idea principal o dato clave del artículo con opciones breves y claras"
         )
 
     bloque_ejemplos = ""
@@ -888,16 +915,19 @@ def generar_pregunta_con_gemini(
             f"\"\"\"\n{ejemplos}\n\"\"\"\n"
         )
 
-    prompt = f"""Genera una pregunta oficial tipo test de oposición a partir del siguiente fragmento normativo:
+    prompt = f"""Genera una pregunta tipo test de oposición de ORDENANZA (Agrupación Profesional) a partir del siguiente precepto:
 
-REFERENCIA: {referencia}
+NORMA Y ARTÍCULO: {contexto_normativo}
 TEXTO LITERAL:
 \"\"\"
 {contenido}
 \"\"\"
 {bloque_ejemplos}
 MODALIDAD REQUERIDA EN ESTE TURNO: Redacta una pregunta {instruccion_modalidad}.
-Recuerda ajustar las longitudes: pregunta <= 280 caracteres, cada una de las 4 opciones <= 95 caracteres, explicacion <= 190 caracteres citando expresamente '{referencia}'."""
+Recuerda:
+- Empieza SIEMPRE situando claramente la norma ({contexto_normativo}) y el tema del artículo en el enunciado.
+- Nivel accesible y práctico de Ordenanza (evita preguntas oscuras o rebuscadas).
+- Longitudes: pregunta <= 280 caracteres, cada una de las 4 opciones <= 95 caracteres (preferiblemente cortas y claras), explicacion <= 190 caracteres citando '{contexto_normativo}' sin mencionar letras A/B/C/D."""
 
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_INSTRUCTION,
@@ -1010,7 +1040,7 @@ def construir_cabecera_tanda(
     return (
         f"📌 *{franja} — {len(fragmentos)} PREGUNTAS*\n"
         f"📚 *Artículos en juego:* {referencias}\n"
-        f"🏛️ _Incluye preguntas directas, en negativo y 1 supuesto práctico de Ordenanza._"
+        f"🏛️ _Nivel Ordenanza: 3 directas claras, 1 en negativo y 1 supuesto práctico._"
         f"{nota_repaso}"
     )
 
@@ -1235,9 +1265,10 @@ def main() -> None:
     for idx, (frag_id, referencia, contenido, veces_usado, es_repaso) in enumerate(
         fragmentos, start=1
     ):
+        # Proporción ajustada a Ordenanza: 3 directas claras + 1 negativa clara + 1 caso práctico
         if idx == total:
             modalidad = "caso_practico"
-        elif idx % 2 == 0:
+        elif idx == total - 1:
             modalidad = "negativa"
         else:
             modalidad = "directa"

@@ -21,40 +21,42 @@ def main() -> None:
         )
         suscriptores = cursor.fetchall()
 
-        cursor.execute(
-            """
-            SELECT referencia, fallos_pendientes, veces_usado
-            FROM fragmentos
-            WHERE COALESCE(fallos_pendientes, 0) > 0
-            ORDER BY fallos_pendientes DESC, id ASC
-            """
-        )
-        articulos_marcados = cursor.fetchall()
+        total_cache = cursor.execute("SELECT COUNT(*) FROM banco_preguntas").fetchone()[0]
 
     print("=" * 74)
-    print(f"  ESTADÍSTICAS DE RENDIMIENTO ({len(suscriptores)} SUSCRIPTORES REGISTRADOS)")
+    print(
+        f"  ESTADÍSTICAS INDIVIDUALES ({len(suscriptores)} SUSCRIPTORES | {total_cache} PREGUNTAS EN CACHÉ)"
+    )
     print("=" * 74)
 
-    for cid, nombre_cif, _, activo in suscriptores:
-        nombre = gen.descifrar_nombre(nombre_cif, bot_token)
-        estado = "ACTIVO" if activo == 1 else "BAJA"
-        informe = gen.construir_informe_semanal_usuario(cid, nombre, dias=7, db_path=gen.DB_PATH)
-        print(f"\n👤 Usuario: {nombre} (ID: {cid} | {estado})")
-        print("-" * 74)
-        if informe:
-            print(informe)
-        else:
-            print("  (Sin respuestas registradas todavía a partir de esta actualización)")
+    with sqlite3.connect(gen.DB_PATH) as conn:
+        cursor = conn.cursor()
+        for cid, nombre_cif, _, activo in suscriptores:
+            nombre = gen.descifrar_nombre(nombre_cif, bot_token)
+            estado = "ACTIVO" if activo == 1 else "BAJA"
+            informe = gen.construir_informe_semanal_usuario(cid, nombre, dias=7, db_path=gen.DB_PATH)
+
+            cursor.execute(
+                """
+                SELECT f.referencia
+                FROM fallos_usuario fu
+                JOIN fragmentos f ON f.id = fu.fragmento_id
+                WHERE fu.chat_id = ? AND fu.pendiente = 1
+                ORDER BY fu.ultima_actualizacion DESC
+                """,
+                (cid,),
+            )
+            pendientes_user = [r[0] for r in cursor.fetchall()]
+
+            print(f"\n👤 Usuario: {nombre} (ID: {cid} | {estado})")
+            print("-" * 74)
+            if informe:
+                print(informe)
+            else:
+                print("  (Sin respuestas registradas todavía en los últimos 7 días)")
+            print(f"  🔄 Repasos personales pendientes ({len(pendientes_user)}): {', '.join(pendientes_user) if pendientes_user else 'Ninguno'}")
 
     print("\n" + "=" * 74)
-    print(f"  🔄 ARTÍCULOS MARCADOS PARA REPASO ({len(articulos_marcados)} pendientes)")
-    print("=" * 74)
-    if articulos_marcados:
-        for ref, fallos, veces in articulos_marcados:
-            print(f"  • {ref:<45} | Fallos pendientes: {fallos} | Usos: {veces}")
-    else:
-        print("  Ningún artículo pendiente de refuerzo en este momento.")
-    print("=" * 74)
 
 
 if __name__ == "__main__":

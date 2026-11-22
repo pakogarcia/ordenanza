@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import re
 import sqlite3
@@ -83,6 +84,37 @@ def ejecutar_auditoria() -> int:
             checks_ok.append("Consistencia de contadores `fallos_pendientes` (sin valores negativos): OK.")
         else:
             alertas.append(f"Se detectaron {fallos_negativos} artículos con fallos_pendientes < 0.")
+
+        # 3b. Integridad y privacidad de `fallos_usuario` (repaso por usuario)
+        cursor.execute("SELECT chat_id, pendiente FROM fallos_usuario")
+        filas_fu = cursor.fetchall()
+        fu_invalidos = [
+            f for f in filas_fu if not gen.validar_chat_id(f[0]) or f[1] not in (0, 1)
+        ]
+        if not fu_invalidos:
+            checks_ok.append(
+                f"Integridad de tabla `fallos_usuario` ({len(filas_fu)} registros personales): OK."
+            )
+        else:
+            alertas.append(f"Registros inválidos en `fallos_usuario`: {len(fu_invalidos)}")
+
+        # 3c. Integridad de caché `banco_preguntas`
+        cursor.execute("SELECT id, opciones_json, indice_correcta FROM banco_preguntas")
+        filas_bp = cursor.fetchall()
+        bp_invalidos = 0
+        for _, opc_json, idx_corr in filas_bp:
+            try:
+                ops = json.loads(opc_json)
+                if not isinstance(ops, list) or len(ops) != 4 or idx_corr not in (0, 1, 2, 3):
+                    bp_invalidos += 1
+            except Exception:
+                bp_invalidos += 1
+        if bp_invalidos == 0:
+            checks_ok.append(
+                f"Integridad de caché `banco_preguntas` ({len(filas_bp)} preguntas almacenadas): OK."
+            )
+        else:
+            alertas.append(f"Hay {bp_invalidos} preguntas con formato inválido en `banco_preguntas`.")
 
     # 4. Auditoría de archivos rastreados en Git y secretos
     try:

@@ -214,7 +214,41 @@ def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
                 tema TEXT,
                 referencia TEXT,
                 indice_correcta INTEGER,
-                fecha_envio TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                fecha_envio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                pregunta_id INTEGER
+            )
+            """
+        )
+        columnas_enc = {
+            info[1] for info in cursor.execute("PRAGMA table_info(encuestas_enviadas)").fetchall()
+        }
+        if "pregunta_id" not in columnas_enc:
+            cursor.execute(
+                "ALTER TABLE encuestas_enviadas ADD COLUMN pregunta_id INTEGER"
+            )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fallos_usuario (
+                chat_id TEXT,
+                fragmento_id INTEGER,
+                pendiente INTEGER DEFAULT 1,
+                ultima_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, fragmento_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS banco_preguntas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fragmento_id INTEGER,
+                modalidad TEXT,
+                pregunta TEXT,
+                opciones_json TEXT,
+                indice_correcta INTEGER,
+                explicacion TEXT,
+                fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -670,20 +704,24 @@ def sincronizar_suscriptores(
                                     if acertada == 0:
                                         cursor.execute(
                                             """
-                                            UPDATE fragmentos
-                                            SET fallos_pendientes = 1
-                                            WHERE id = ?
+                                            INSERT INTO fallos_usuario (chat_id, fragmento_id, pendiente, ultima_actualizacion)
+                                            VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+                                            ON CONFLICT(chat_id, fragmento_id) DO UPDATE SET
+                                                pendiente = 1,
+                                                ultima_actualizacion = CURRENT_TIMESTAMP
                                             """,
-                                            (frag_id,),
+                                            (user_id, frag_id),
                                         )
                                     else:
                                         cursor.execute(
                                             """
-                                            UPDATE fragmentos
-                                            SET fallos_pendientes = 0
-                                            WHERE id = ?
+                                            INSERT INTO fallos_usuario (chat_id, fragmento_id, pendiente, ultima_actualizacion)
+                                            VALUES (?, ?, 0, CURRENT_TIMESTAMP)
+                                            ON CONFLICT(chat_id, fragmento_id) DO UPDATE SET
+                                                pendiente = 0,
+                                                ultima_actualizacion = CURRENT_TIMESTAMP
                                             """,
-                                            (frag_id,),
+                                            (user_id, frag_id),
                                         )
 
                 if max_update_id is not None:
@@ -716,27 +754,24 @@ def sincronizar_suscriptores(
         return [fila[0] for fila in cursor.fetchall()]
 
 
-def obtener_fragmentos_para_tanda(
+def obtener_fragmentos_nuevos_tanda(
     cantidad: int = NUM_PREGUNTAS_POR_TANDA,
     db_path: str = DB_PATH,
-) -> list[tuple[int, str, str, int, bool]]:
+) -> list[tuple[int, str, str, int]]:
     """
-    Selecciona los fragmentos de la tanda combinando:
-    - Hasta `MAX_REPASOS_POR_TANDA` artículos que tengan `fallos_pendientes > 0`
-      (que no hayan salido en las últimas 10 encuestas, para dejar margen de asimilación).
-    - El resto de preguntas priorizando los artículos con menor `veces_usado`.
+    Selecciona `cantidad` fragmentos nuevos para la tanda común priorizando los de menor
+    `veces_usado` y evitando los preguntados en las últimas 48 horas.
     """
     if not os.path.exists(db_path):
         raise FileNotFoundError(
             f"No existe la base de datos '{db_path}'. Ejecuta primero 1_procesar_pdf.py."
         )
 
-    seleccionados: list[tuple[int, str, str, int, bool]] = []
+    seleccionados: list[tuple[int, str, str, int]] = []
     ids_usados: set[int] = set()
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        # Enfriamiento de 48 horas: ningún artículo recién preguntado puede volver a salir en 2 días
         cursor.execute(
             """
             SELECT fragmento_id
@@ -751,21 +786,6 @@ def obtener_fragmentos_para_tanda(
             """
             SELECT id, referencia, contenido, veces_usado
             FROM fragmentos
-            WHERE COALESCE(fallos_pendientes, 0) > 0
-            ORDER BY veces_usado ASC, RANDOM()
-            """
-        )
-        for fid, ref, cont, veces in cursor.fetchall():
-            if len(seleccionados) >= min(MAX_REPASOS_POR_TANDA, cantidad):
-                break
-            if fid not in recien_preguntados:
-                seleccionados.append((fid, ref, cont, veces, True))
-                ids_usados.add(fid)
-
-        cursor.execute(
-            """
-            SELECT id, referencia, contenido, veces_usado
-            FROM fragmentos
             ORDER BY veces_usado ASC, RANDOM()
             """
         )
@@ -773,10 +793,9 @@ def obtener_fragmentos_para_tanda(
             if len(seleccionados) >= cantidad:
                 break
             if fid not in ids_usados and fid not in recien_preguntados:
-                seleccionados.append((fid, ref, cont, veces, False))
+                seleccionados.append((fid, ref, cont, veces))
                 ids_usados.add(fid)
 
-        # Respaldo por si el temario tuviera pocos artículos y todos estuvieran en enfriamiento
         if len(seleccionados) < cantidad:
             cursor.execute(
                 """
@@ -789,7 +808,7 @@ def obtener_fragmentos_para_tanda(
                 if len(seleccionados) >= cantidad:
                     break
                 if fid not in ids_usados:
-                    seleccionados.append((fid, ref, cont, veces, False))
+                    seleccionados.append((fid, ref, cont, veces))
                     ids_usados.add(fid)
 
     if not seleccionados:
@@ -798,25 +817,129 @@ def obtener_fragmentos_para_tanda(
     return seleccionados
 
 
-def incrementar_uso_fragmento(
-    fragmento_id: int,
-    es_repaso: bool = False,
+def obtener_repasos_personales(
+    chat_id: str,
+    max_repasos: int = MAX_REPASOS_POR_TANDA,
     db_path: str = DB_PATH,
-) -> None:
-    """Incrementa `veces_usado` y, si salió como repaso, limpia `fallos_pendientes` para no arrastrarlo."""
+) -> list[tuple[int, str, str]]:
+    """
+    Obtiene hasta `max_repasos` artículos fallados pendientes exclusivamente por `chat_id`
+    que no se hayan preguntado a ese usuario en las últimas 48 horas.
+    """
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        if es_repaso:
-            cursor.execute(
-                "UPDATE fragmentos SET veces_usado = veces_usado + 1, fallos_pendientes = 0 WHERE id = ?",
-                (fragmento_id,),
-            )
-        else:
-            cursor.execute(
-                "UPDATE fragmentos SET veces_usado = veces_usado + 1 WHERE id = ?",
-                (fragmento_id,),
-            )
+        cursor.execute(
+            """
+            SELECT fu.fragmento_id, f.referencia, f.contenido
+            FROM fallos_usuario fu
+            JOIN fragmentos f ON f.id = fu.fragmento_id
+            WHERE fu.chat_id = ?
+              AND fu.pendiente = 1
+              AND fu.fragmento_id NOT IN (
+                  SELECT fragmento_id
+                  FROM encuestas_enviadas
+                  WHERE chat_id = ?
+                    AND fecha_envio >= datetime('now', '-2 days')
+                    AND fragmento_id IS NOT NULL
+              )
+            ORDER BY fu.ultima_actualizacion ASC, RANDOM()
+            LIMIT ?
+            """,
+            (str(chat_id), str(chat_id), max_repasos),
+        )
+        return cursor.fetchall()
+
+
+def limpiar_fallo_personal_enviado(
+    chat_id: str,
+    fragmento_id: int,
+    db_path: str = DB_PATH,
+) -> None:
+    """Marca como ya repasado (`pendiente = 0`) el fallo personal al enviarlo en la tanda."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE fallos_usuario
+            SET pendiente = 0, ultima_actualizacion = CURRENT_TIMESTAMP
+            WHERE chat_id = ? AND fragmento_id = ?
+            """,
+            (str(chat_id), fragmento_id),
+        )
         conn.commit()
+
+
+def guardar_en_banco_preguntas(
+    fragmento_id: int,
+    modalidad: str,
+    test: PreguntaTest,
+    db_path: str = DB_PATH,
+) -> int:
+    """Guarda una pregunta generada en la caché `banco_preguntas` y devuelve su ID."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO banco_preguntas
+            (fragmento_id, modalidad, pregunta, opciones_json, indice_correcta, explicacion)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fragmento_id,
+                modalidad,
+                test.pregunta,
+                json.dumps(test.opciones, ensure_ascii=False),
+                test.indice_correcta,
+                test.explicacion,
+            ),
+        )
+        conn.commit()
+        return int(cursor.lastrowid)
+
+
+def buscar_pregunta_cacheada_no_vista(
+    chat_id: str,
+    fragmento_id: int,
+    db_path: str = DB_PATH,
+) -> tuple[int, PreguntaTest] | None:
+    """
+    Busca en `banco_preguntas` una pregunta ya generada sobre `fragmento_id` que
+    `chat_id` aún no haya recibido, para reutilizarla a coste 0 €.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT bp.id, bp.pregunta, bp.opciones_json, bp.indice_correcta, bp.explicacion
+            FROM banco_preguntas bp
+            WHERE bp.fragmento_id = ?
+              AND bp.id NOT IN (
+                  SELECT COALESCE(pregunta_id, -1)
+                  FROM encuestas_enviadas
+                  WHERE chat_id = ?
+              )
+            ORDER BY RANDOM()
+            LIMIT 1
+            """,
+            (fragmento_id, str(chat_id)),
+        )
+        fila = cursor.fetchone()
+
+    if not fila:
+        return None
+
+    pid, preg, opc_json, idx_corr, expl = fila
+    try:
+        test = PreguntaTest(
+            pregunta=preg,
+            opciones=json.loads(opc_json),
+            indice_correcta=int(idx_corr),
+            explicacion=expl,
+        )
+        if not obtener_errores_longitud(test):
+            return int(pid), test
+    except Exception:
+        return None
+    return None
 
 
 def registrar_encuesta_enviada(
@@ -825,9 +948,10 @@ def registrar_encuesta_enviada(
     fragmento_id: int,
     referencia: str,
     indice_correcta: int,
+    pregunta_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> None:
-    """Guarda los metadatos de cada Poll enviado para poder cruzar luego `poll_answer`."""
+    """Guarda los metadatos de cada Poll enviado para cruzar `poll_answer` y evitar repetir preguntas."""
     if not poll_id:
         return
     tema = extraer_tema_de_referencia(referencia)
@@ -836,10 +960,18 @@ def registrar_encuesta_enviada(
         cursor.execute(
             """
             INSERT OR REPLACE INTO encuestas_enviadas
-            (poll_id, chat_id, fragmento_id, tema, referencia, indice_correcta)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (poll_id, chat_id, fragmento_id, tema, referencia, indice_correcta, pregunta_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (str(poll_id), str(chat_id), fragmento_id, tema, referencia, indice_correcta),
+            (
+                str(poll_id),
+                str(chat_id),
+                fragmento_id,
+                tema,
+                referencia,
+                indice_correcta,
+                pregunta_id,
+            ),
         )
         conn.commit()
 
@@ -1078,10 +1210,23 @@ def mezclar_opciones_test(
     return test
 
 
+def incrementar_uso_fragmento(
+    fragmento_id: int,
+    db_path: str = DB_PATH,
+) -> None:
+    """Incrementa `veces_usado` del fragmento utilizado."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE fragmentos SET veces_usado = veces_usado + 1 WHERE id = ?",
+            (fragmento_id,),
+        )
+        conn.commit()
+
+
 def construir_cabecera_tanda(
-    fragmentos: list[tuple[int, str, str, int, bool]]
+    items_tanda: list[tuple[str, bool]]
 ) -> str:
-    """Construye el mensaje de cabecera que anuncia la batería de 5 preguntas."""
+    """Construye el mensaje de cabecera personalizado con las referencias de la tanda."""
     hora_utc = datetime.now(timezone.utc).hour
     if hora_utc < 11:
         franja = "☀️ TANDA DE MAÑANA (09:00 h)"
@@ -1091,19 +1236,19 @@ def construir_cabecera_tanda(
         franja = "🌙 TANDA DE NOCHE (20:00 h)"
 
     etiquetas = [
-        f"{ref} 🔄" if es_rep else ref for _, ref, _, _, es_rep in fragmentos
+        f"{ref} 🔄" if es_rep else ref for ref, es_rep in items_tanda
     ]
     referencias = ", ".join(etiquetas)
-    num_repasos = sum(1 for *_, es_rep in fragmentos if es_rep)
+    num_repasos = sum(1 for _, es_rep in items_tanda if es_rep)
     nota_repaso = (
-        f"\n🔄 _Incluye {num_repasos} artículo(s) de refuerzo fallado(s) anteriormente._"
+        f"\n🔄 _Incluye {num_repasos} repaso(s) personalizado(s) de artículos que fallaste anteriormente._"
         if num_repasos > 0
         else ""
     )
     return (
-        f"📌 *{franja} — {len(fragmentos)} PREGUNTAS*\n"
+        f"📌 *{franja} — {len(items_tanda)} PREGUNTAS*\n"
         f"📚 *Artículos en juego:* {referencias}\n"
-        f"🏛️ _Nivel Ordenanza: 3 directas claras, 1 en negativo y 1 supuesto práctico._"
+        f"🏛️ _Nivel Ordenanza: preguntas claras, 1 en negativo y 1 supuesto práctico._"
         f"{nota_repaso}"
     )
 
@@ -1302,7 +1447,7 @@ def main() -> None:
         destinatarios = sincronizar_suscriptores(bot_token, channel_id, DB_PATH)
         print(f"Suscriptores activos detectados: {len(destinatarios)}")
 
-    fragmentos = obtener_fragmentos_para_tanda(NUM_PREGUNTAS_POR_TANDA, DB_PATH)
+    fragmentos = obtener_fragmentos_nuevos_tanda(NUM_PREGUNTAS_POR_TANDA, DB_PATH)
     ejemplos = leer_ejemplos_clase()
     client = genai.Client(
         api_key=api_key,
@@ -1313,22 +1458,17 @@ def main() -> None:
     )
 
     total = len(fragmentos)
-    cabecera = construir_cabecera_tanda(fragmentos)
-    print(f"\nGenerando las {total} preguntas antes de enviar a Telegram...\n")
+    print(f"\nGenerando las {total} preguntas nuevas comunes y guardándolas en caché...\n")
 
-    # 1. Generar las 5 preguntas en memoria antes de enviarlas
-    #    Distribuir aleatoriamente las posiciones correctas (A, B, C, D) sin sesgo hacia la A
+    # 1. Generar las 5 preguntas comunes nuevas y guardarlas en `banco_preguntas`
+    preguntas_comunes: list[tuple[int, str, int, str, int, PreguntaTest]] = []
     rng = secrets.SystemRandom()
     bolsa_posiciones = [0, 1, 2, 3]
     while len(bolsa_posiciones) < total:
         bolsa_posiciones.append(rng.randint(0, 3))
     rng.shuffle(bolsa_posiciones)
 
-    preguntas_generadas: list[tuple[int, int, str, int, str, bool, PreguntaTest]] = []
-    for idx, (frag_id, referencia, contenido, veces_usado, es_repaso) in enumerate(
-        fragmentos, start=1
-    ):
-        # Proporción ajustada a Ordenanza: 3 directas claras + 1 negativa clara + 1 caso práctico
+    for idx, (frag_id, referencia, contenido, veces_usado) in enumerate(fragmentos, start=1):
         if idx == total:
             modalidad = "caso_practico"
         elif idx == total - 1:
@@ -1342,50 +1482,95 @@ def main() -> None:
             contenido=contenido,
             ejemplos=ejemplos,
             modalidad=modalidad,
-            es_repaso=es_repaso,
+            es_repaso=False,
         )
         pregunta_test = mezclar_opciones_test(
             pregunta_test,
             posicion_objetivo=bolsa_posiciones[idx - 1],
         )
+        pregunta_id = guardar_en_banco_preguntas(frag_id, modalidad, pregunta_test, DB_PATH)
         imprimir_resultado_consola(
-            idx, total, modalidad, es_repaso, frag_id, referencia, veces_usado, pregunta_test
+            idx, total, modalidad, False, frag_id, referencia, veces_usado, pregunta_test
         )
-        preguntas_generadas.append(
-            (idx, frag_id, referencia, veces_usado, modalidad, es_repaso, pregunta_test)
+        preguntas_comunes.append(
+            (frag_id, referencia, veces_usado, modalidad, pregunta_id, pregunta_test)
         )
+        incrementar_uso_fragmento(frag_id, DB_PATH)
 
-    # 2. Enviar cabecera + las 5 encuestas seguidas y registrar cada poll_id
+    # 2. Enviar a cada suscriptor su batería personalizada:
+    #    hasta 2 repasos de SUS propios fallos (reutilizando banco_preguntas a coste 0) + preguntas comunes nuevas
     omitir_cabecera = os.getenv("OMITIR_CABECERA", "").strip() == "1"
-    if destinatarios and not omitir_cabecera:
-        for dest_id in destinatarios:
+    for dest_id in destinatarios:
+        repasos_usuario = obtener_repasos_personales(dest_id, MAX_REPASOS_POR_TANDA, DB_PATH)
+        # Lista final de envío: (frag_id, referencia, es_repaso, pregunta_id, PreguntaTest)
+        tanda_usuario: list[tuple[int, str, bool, int, PreguntaTest]] = []
+        ids_en_tanda: set[int] = set()
+
+        for r_frag_id, r_ref, r_cont in repasos_usuario:
+            cacheada = buscar_pregunta_cacheada_no_vista(dest_id, r_frag_id, DB_PATH)
+            if cacheada:
+                p_id, p_test = cacheada
+            else:
+                p_test = generar_pregunta_con_gemini(
+                    client=client,
+                    referencia=r_ref,
+                    contenido=r_cont,
+                    ejemplos=ejemplos,
+                    modalidad="directa",
+                    es_repaso=True,
+                )
+                p_test = mezclar_opciones_test(p_test)
+                p_id = guardar_en_banco_preguntas(r_frag_id, "repaso", p_test, DB_PATH)
+
+            p_test_barajada = mezclar_opciones_test(p_test)
+            # Asegurar prefijo visual de repaso sin superar los 300 chars de Telegram
+            if not p_test_barajada.pregunta.startswith("🔄"):
+                candidato = f"🔄 [Repaso] {p_test_barajada.pregunta}"
+                if len(candidato) <= TELEGRAM_MAX_PREGUNTA:
+                    p_test_barajada.pregunta = candidato
+            tanda_usuario.append((r_frag_id, r_ref, True, p_id, p_test_barajada))
+            ids_en_tanda.add(r_frag_id)
+
+        for c_frag_id, c_ref, _, _, c_pid, c_test in preguntas_comunes:
+            if len(tanda_usuario) >= total:
+                break
+            if c_frag_id not in ids_en_tanda:
+                tanda_usuario.append((c_frag_id, c_ref, False, c_pid, c_test))
+                ids_en_tanda.add(c_frag_id)
+
+        cabecera_usuario = construir_cabecera_tanda(
+            [(ref, es_rep) for _, ref, es_rep, _, _ in tanda_usuario]
+        )
+        if not omitir_cabecera:
             try:
-                enviar_mensaje_telegram(bot_token, dest_id, cabecera)
+                enviar_mensaje_telegram(bot_token, dest_id, cabecera_usuario)
             except Exception as e:
                 print(f"[Aviso] Error enviando cabecera a {enmascarar_id(dest_id)}: {type(e).__name__}")
 
-    for idx, frag_id, referencia, veces_usado, modalidad, es_repaso, pregunta_test in preguntas_generadas:
-        if destinatarios:
-            enviados_ok = 0
-            for dest_id in destinatarios:
-                try:
-                    res_poll = enviar_poll_telegram(bot_token, dest_id, pregunta_test)
-                    poll_id = res_poll.get("result", {}).get("poll", {}).get("id")
-                    registrar_encuesta_enviada(
-                        poll_id=poll_id,
-                        chat_id=dest_id,
-                        fragmento_id=frag_id,
-                        referencia=referencia,
-                        indice_correcta=pregunta_test.indice_correcta,
-                        db_path=DB_PATH,
-                    )
-                    enviados_ok += 1
-                except Exception as e:
-                    print(f"[Aviso] No se pudo enviar Poll a {enmascarar_id(dest_id)}: {e}")
-            print(f"✅ Pregunta {idx}/{total} enviada a {enviados_ok}/{len(destinatarios)} suscriptores.")
-            if idx < total:
-                time.sleep(1.0)
-        incrementar_uso_fragmento(frag_id, es_repaso=es_repaso, db_path=DB_PATH)
+        enviadas_usuario = 0
+        for p_frag_id, p_ref, p_es_rep, p_id, p_test in tanda_usuario:
+            try:
+                res_poll = enviar_poll_telegram(bot_token, dest_id, p_test)
+                poll_id = res_poll.get("result", {}).get("poll", {}).get("id")
+                registrar_encuesta_enviada(
+                    poll_id=poll_id,
+                    chat_id=dest_id,
+                    fragmento_id=p_frag_id,
+                    referencia=p_ref,
+                    indice_correcta=p_test.indice_correcta,
+                    pregunta_id=p_id,
+                    db_path=DB_PATH,
+                )
+                if p_es_rep:
+                    limpiar_fallo_personal_enviado(dest_id, p_frag_id, DB_PATH)
+                enviadas_usuario += 1
+            except Exception as e:
+                print(f"[Aviso] No se pudo enviar Poll a {enmascarar_id(dest_id)}: {e}")
+
+        print(
+            f"✅ Tanda personalizada ({enviadas_usuario}/{len(tanda_usuario)}, repasos={len(repasos_usuario)}) enviada a {enmascarar_id(dest_id)}."
+        )
+        time.sleep(0.5)
 
     registrar_tanda_enviada(clave_tanda, DB_PATH)
 

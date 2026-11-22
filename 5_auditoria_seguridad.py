@@ -35,14 +35,16 @@ def ejecutar_auditoria() -> int:
             alertas.append(f"Fallo de integridad en SQLite: {res_int}")
 
         # 2. Auditoría de datos personales (PII) y gestión de usuarios en `suscriptores`
-        cursor.execute("SELECT chat_id, nombre, COALESCE(activo, 1) FROM suscriptores")
+        cursor.execute("SELECT chat_id, nombre, alias, COALESCE(activo, 1), COALESCE(en_ranking, 1) FROM suscriptores")
         suscriptores = cursor.fetchall()
         sin_cifrar = []
         ids_invalidos = []
-        for cid, nombre_guardado, activo in suscriptores:
-            if not gen.validar_chat_id(cid):
+        for cid, nombre_guardado, alias_guardado, activo, en_ranking in suscriptores:
+            if not gen.validar_chat_id(cid) or en_ranking not in (0, 1):
                 ids_invalidos.append(cid)
             if nombre_guardado and not str(nombre_guardado).startswith("ENC:"):
+                sin_cifrar.append(cid)
+            if alias_guardado and not str(alias_guardado).startswith("ENC:"):
                 sin_cifrar.append(cid)
 
         if not ids_invalidos:
@@ -62,7 +64,7 @@ def ejecutar_auditoria() -> int:
                 f"Existen {len(sin_cifrar)} nombres de usuario en texto plano sin cifrar en SQLite."
             )
 
-        activos = sum(1 for _, _, a in suscriptores if a == 1)
+        activos = sum(1 for _, _, _, a, _ in suscriptores if a == 1)
         bajas = len(suscriptores) - activos
         checks_ok.append(
             f"Control de estado de usuarios (/start y /baja): {activos} activos, {bajas} en baja."

@@ -41,10 +41,13 @@ MENSAJE_BIENVENIDA = (
     "✅ Tu suscripción está activa. Recibirás automáticamente:\n"
     "• *5 preguntas tipo test* en cada franja (*09:00, 14:00 y 20:00 h*).\n"
     "• El *💡 TIP DE HOY* cada noche a las 20:00 h.\n"
-    "• Un *📊 Informe Semanal* los domingos por la noche con tus estadísticas por tema y los artículos que más necesitas repasar (además, los artículos fallados se vuelven a preguntar en días siguientes para afianzarlos).\n\n"
+    "• Un *📊 Informe Semanal* y *🏆 Podio de la Liga* los domingos por la noche (con puntuación real `+1 / -0,25`, rachas y los artículos más fallados).\n\n"
     "🧭 *Comandos útiles:*\n"
-    "• `/estadisticas` — Recibe tu informe acumulado en el siguiente turno.\n"
-    "• `/baja` — Pausar el envío de tests (puedes reactivarlo cuando quieras con `/start`)."
+    "• `/estadisticas` — Tu informe personal por temas.\n"
+    "• `/ranking` — Clasificación provisional de la semana.\n"
+    "• `/alias TuApodo` — Cambia tu nombre en el podio.\n"
+    "• `/anonimo` — Ocultarte del podio público.\n"
+    "• `/baja` — Pausar el envío de tests (`/start` para volver)."
 )
 
 MENSAJE_BAJA = (
@@ -174,7 +177,9 @@ def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
                 chat_id TEXT PRIMARY KEY,
                 nombre TEXT,
                 fecha_alta TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                activo INTEGER DEFAULT 1
+                activo INTEGER DEFAULT 1,
+                alias TEXT,
+                en_ranking INTEGER DEFAULT 1
             )
             """
         )
@@ -184,6 +189,14 @@ def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
         if "activo" not in columnas_susc:
             cursor.execute(
                 "ALTER TABLE suscriptores ADD COLUMN activo INTEGER DEFAULT 1"
+            )
+        if "alias" not in columnas_susc:
+            cursor.execute(
+                "ALTER TABLE suscriptores ADD COLUMN alias TEXT"
+            )
+        if "en_ranking" not in columnas_susc:
+            cursor.execute(
+                "ALTER TABLE suscriptores ADD COLUMN en_ranking INTEGER DEFAULT 1"
             )
 
         cursor.execute(
@@ -285,15 +298,15 @@ def inicializar_tablas_auxiliares(db_path: str = DB_PATH) -> None:
 
 
 def migrar_nombres_a_cifrado(bot_token: str | None = None, db_path: str = DB_PATH) -> int:
-    """Cifra cualquier nombre en texto plano existente en la tabla `suscriptores`."""
+    """Cifra cualquier nombre o alias en texto plano existente en la tabla `suscriptores`."""
     f = _obtener_fernet(bot_token)
     if not f:
         return 0
     migrados = 0
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT chat_id, nombre FROM suscriptores")
-        for cid, nombre in cursor.fetchall():
+        cursor.execute("SELECT chat_id, nombre, alias FROM suscriptores")
+        for cid, nombre, alias in cursor.fetchall():
             if nombre and not str(nombre).startswith("ENC:"):
                 cifrado = cifrar_nombre(nombre, bot_token)
                 cursor.execute(
@@ -301,8 +314,31 @@ def migrar_nombres_a_cifrado(bot_token: str | None = None, db_path: str = DB_PAT
                     (cifrado, cid),
                 )
                 migrados += 1
+            if alias and not str(alias).startswith("ENC:"):
+                alias_cif = cifrar_nombre(alias, bot_token)
+                cursor.execute(
+                    "UPDATE suscriptores SET alias = ? WHERE chat_id = ?",
+                    (alias_cif, cid),
+                )
+                migrados += 1
         conn.commit()
     return migrados
+
+
+def nombre_publico_seguro(nombre_plano: str, alias_plano: str | None = None) -> str:
+    """
+    Devuelve el alias elegido o un nombre corto seguro (PrimerNombre Inicial.)
+    para mostrar en el podio público sin exponer apellidos completos (RGPD).
+    """
+    if alias_plano and alias_plano.strip():
+        return sanitizar_nombre_usuario(alias_plano)[:20]
+    limpio = sanitizar_nombre_usuario(nombre_plano)
+    if limpio in ("Administrador", "Pako García"):
+        return "Pako G."
+    partes = limpio.split()
+    if len(partes) >= 2:
+        return f"{partes[0][:15]} {partes[1][0].upper()}."
+    return limpio[:18]
 
 
 def desactivar_suscriptor(chat_id: str, db_path: str = DB_PATH) -> None:
@@ -517,6 +553,132 @@ def construir_informe_semanal_usuario(
     return "\n".join(lineas)
 
 
+def construir_podio_semanal(
+    bot_token: str | None = None,
+    chat_id_solicitante: str | None = None,
+    dias: int = 7,
+    db_path: str = DB_PATH,
+) -> str | None:
+    """
+    Genera la clasificación semanal de la Liga de Ordenanzas (puntuación oficial:
+    +1,00 punto por acierto y -0,25 puntos por fallo), medallas de constancia/precisión
+    y el Top 3 de artículos más fallados por el grupo en los últimos 7 días.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT s.chat_id,
+                   s.nombre,
+                   s.alias,
+                   COALESCE(s.en_ranking, 1) AS en_ranking,
+                   COUNT(r.poll_id) AS total_resp,
+                   COALESCE(SUM(r.acertada), 0) AS aciertos,
+                   COUNT(DISTINCT DATE(r.fecha_respuesta)) AS dias_activos
+            FROM suscriptores s
+            JOIN respuestas_usuarios r ON r.chat_id = s.chat_id
+            WHERE COALESCE(s.activo, 1) = 1
+              AND r.fecha_respuesta >= datetime('now', ?)
+            GROUP BY s.chat_id
+            HAVING total_resp > 0
+            """,
+            (f"-{dias} days",),
+        )
+        filas_users = cursor.fetchall()
+
+        cursor.execute(
+            """
+            SELECT referencia,
+                   COUNT(*) AS intentos,
+                   SUM(CASE WHEN acertada = 0 THEN 1 ELSE 0 END) AS fallos
+            FROM respuestas_usuarios
+            WHERE fecha_respuesta >= datetime('now', ?)
+            GROUP BY referencia
+            HAVING intentos >= 3 AND fallos > 0
+            ORDER BY (CAST(fallos AS REAL) / intentos) DESC, fallos DESC
+            LIMIT 3
+            """,
+            (f"-{dias} days",),
+        )
+        top_trampas = cursor.fetchall()
+
+    if not filas_users:
+        return None
+
+    clasificacion = []
+    for cid, nom_cif, alias_cif, en_ranking, tot, ok, dias_act in filas_users:
+        fallos = tot - ok
+        puntos = round(ok - (0.25 * fallos), 2)
+        pct = round((ok / tot) * 100, 1) if tot > 0 else 0.0
+        nom_plano = descifrar_nombre(nom_cif, bot_token)
+        alias_plano = descifrar_nombre(alias_cif, bot_token) if alias_cif else None
+        etiqueta_pub = nombre_publico_seguro(nom_plano, alias_plano)
+
+        medallas = []
+        if tot >= 10 and pct >= 85.0:
+            medallas.append("🎯")
+        if dias_act >= 5:
+            medallas.append("🔥")
+
+        clasificacion.append(
+            {
+                "chat_id": str(cid),
+                "nombre_pub": etiqueta_pub,
+                "en_ranking": int(en_ranking),
+                "puntos": puntos,
+                "aciertos": ok,
+                "fallos": fallos,
+                "pct": pct,
+                "dias": dias_act,
+                "medallas": "".join(medallas),
+            }
+        )
+
+    clasificacion.sort(key=lambda x: (-x["puntos"], -x["aciertos"], -x["pct"]))
+
+    visibles = [c for c in clasificacion if c["en_ranking"] == 1]
+    iconos_puesto = ["🥇", "🥈", "🥉"]
+
+    lineas = [
+        "🏆 *LIGA SEMANAL — OPOSICIONES ORDENANZA CÓRDOBA*",
+        "_Puntuación oficial de examen: +1,00 acierto | -0,25 fallo_",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if visibles:
+        for idx, item in enumerate(visibles[:10]):
+            pos = iconos_puesto[idx] if idx < 3 else f"*{idx + 1}.º*"
+            med = f" {item['medallas']}" if item["medallas"] else ""
+            pts_str = f"{item['puntos']:.2f}".replace(".", ",")
+            lineas.append(
+                f"{pos} *{item['nombre_pub']}*{med} — `{pts_str} pts` "
+                f"({item['aciertos']}✅ / {item['fallos']}❌ · {item['dias']}d🔥)"
+            )
+    else:
+        lineas.append("_Todos los participantes están en modo discreto esta semana._")
+
+    if chat_id_solicitante:
+        for idx, item in enumerate(clasificacion, start=1):
+            if item["chat_id"] == str(chat_id_solicitante):
+                pts_str = f"{item['puntos']:.2f}".replace(".", ",")
+                lineas.append(
+                    f"\n📍 *Tu posición actual:* {idx}.º de {len(clasificacion)} (`{pts_str} pts` · {item['pct']}%)"
+                )
+                break
+
+    if top_trampas:
+        lineas.append("\n💀 *TOP 3 ARTÍCULOS TRAMPA DE LA SEMANA (Grupo):*")
+        for idx, (ref, intentos, fallos) in enumerate(top_trampas, start=1):
+            pct_fallo = round((fallos / intentos) * 100)
+            lineas.append(f"  {idx}. {ref} — *{pct_fallo}% de fallos*")
+
+    lineas.append(
+        "\n🎖️ _Insignias: 🎯 Francotirador (≥85%) · 🔥 Constancia (≥5 días)_\n"
+        "💡 _Usa `/alias TuApodo` para personalizar tu nombre o `/anonimo` para ocultarte._"
+    )
+    return "\n".join(lineas)
+
+
 def sincronizar_suscriptores(
     bot_token: str,
     channel_id_principal: str | None,
@@ -560,6 +722,7 @@ def sincronizar_suscriptores(
 
         max_update_id = None
         solicitudes_estadisticas = set()
+        solicitudes_ranking = set()
 
         try:
             url_updates = f"https://api.telegram.org/bot{bot_token}/getUpdates"
@@ -585,11 +748,12 @@ def sincronizar_suscriptores(
                             if cm_cid in existentes:
                                 existentes[cm_cid] = (existentes[cm_cid][0], 0)
 
-                    # B) Procesar mensajes de texto (/start, /baja, /estadisticas)
+                    # B) Procesar mensajes de texto (/start, /baja, /estadisticas, /ranking, /alias, /anonimo)
                     msg = upd.get("message") or {}
                     chat = msg.get("chat", {})
                     cid = str(chat.get("id", "")).strip()
-                    texto_msg = (msg.get("text") or "").strip().lower()
+                    texto_original = (msg.get("text") or "").strip()
+                    texto_msg = texto_original.lower()
                     if cid and validar_chat_id(cid):
                         nombre_plano = sanitizar_nombre_usuario(
                             f"{chat.get('first_name', '')} {chat.get('last_name', '')}".strip()
@@ -611,13 +775,12 @@ def sincronizar_suscriptores(
 
                         if cid not in existentes:
                             cursor.execute(
-                                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre, activo) VALUES (?, ?, 1)",
+                                "INSERT OR IGNORE INTO suscriptores (chat_id, nombre, activo, en_ranking) VALUES (?, ?, 1, 1)",
                                 (cid, nombre_cif),
                             )
                             existentes[cid] = (nombre_plano, 1)
                             enviar_mensaje_telegram(bot_token, cid, MENSAJE_BIENVENIDA)
                         else:
-                            # Si estaba de baja y envía /start o /alta, reactivar
                             if existentes[cid][1] == 0 and texto_msg in ("/start", "/alta"):
                                 cursor.execute(
                                     "UPDATE suscriptores SET activo = 1, nombre = ? WHERE chat_id = ?",
@@ -635,8 +798,49 @@ def sincronizar_suscriptores(
                                 )
                                 existentes[cid] = (nombre_plano, existentes[cid][1])
 
+                        if texto_msg.startswith("/alias"):
+                            nuevo_alias = sanitizar_nombre_usuario(texto_original[6:])[:20]
+                            if len(nuevo_alias) >= 2:
+                                cursor.execute(
+                                    "UPDATE suscriptores SET alias = ?, en_ranking = 1 WHERE chat_id = ?",
+                                    (cifrar_nombre(nuevo_alias, bot_token), cid),
+                                )
+                                enviar_mensaje_telegram(
+                                    bot_token,
+                                    cid,
+                                    f"🏷️ Alias actualizado. En la Liga Semanal aparecerás como: *{nuevo_alias}*",
+                                )
+                            else:
+                                enviar_mensaje_telegram(
+                                    bot_token,
+                                    cid,
+                                    "ℹ️ Escribe el apodo detrás del comando. Ejemplo: `/alias HalconCordobes`",
+                                )
+                        elif texto_msg in ("/anonimo", "/anónimo"):
+                            cursor.execute(
+                                "UPDATE suscriptores SET en_ranking = 0 WHERE chat_id = ?",
+                                (cid,),
+                            )
+                            enviar_mensaje_telegram(
+                                bot_token,
+                                cid,
+                                "🕵️ Modo discreto activado: tu nombre no saldrá en el podio público, pero seguirás recibiendo tu Informe Semanal privado. Puedes volver con `/visible`.",
+                            )
+                        elif texto_msg == "/visible":
+                            cursor.execute(
+                                "UPDATE suscriptores SET en_ranking = 1 WHERE chat_id = ?",
+                                (cid,),
+                            )
+                            enviar_mensaje_telegram(
+                                bot_token,
+                                cid,
+                                "🏆 ¡Genial! Vuelves a participar de forma visible en el podio de la Liga Semanal.",
+                            )
+
                         if texto_msg.startswith("/estadistica") or texto_msg.startswith("/informe"):
                             solicitudes_estadisticas.add(cid)
+                        if texto_msg.startswith("/ranking") or texto_msg.startswith("/podio") or texto_msg.startswith("/liga"):
+                            solicitudes_ranking.add(cid)
 
                     # C) Procesar respuestas a encuestas (poll_answer)
                     poll_ans = upd.get("poll_answer")
@@ -746,6 +950,22 @@ def sincronizar_suscriptores(
                     bot_token,
                     cid_est,
                     "📊 Aún no hay respuestas registradas en tus últimos 7 días. ¡Responde a las próximas tandas y verás aquí tu análisis por temas!",
+                )
+
+        for cid_rank in solicitudes_ranking:
+            podio = construir_podio_semanal(
+                bot_token=bot_token,
+                chat_id_solicitante=cid_rank,
+                dias=7,
+                db_path=db_path,
+            )
+            if podio:
+                enviar_mensaje_telegram(bot_token, cid_rank, podio)
+            else:
+                enviar_mensaje_telegram(
+                    bot_token,
+                    cid_rank,
+                    "🏆 Aún no hay suficientes respuestas esta semana para mostrar la clasificación. ¡Responde a las próximas tandas para estrenar el podio!",
                 )
 
         cursor.execute(
@@ -1613,6 +1833,19 @@ def main() -> None:
                     print(f"  ✅ Informe semanal enviado a suscriptor {enmascarar_id(dest_id)}")
                 except Exception as e:
                     print(f"  [Aviso] Error enviando informe semanal a {enmascarar_id(dest_id)}: {type(e).__name__}")
+
+            podio = construir_podio_semanal(
+                bot_token=bot_token,
+                chat_id_solicitante=dest_id,
+                dias=7,
+                db_path=DB_PATH,
+            )
+            if podio:
+                try:
+                    enviar_mensaje_telegram(bot_token, dest_id, podio)
+                    print(f"  🏆 Podio semanal enviado a suscriptor {enmascarar_id(dest_id)}")
+                except Exception as e:
+                    print(f"  [Aviso] Error enviando podio semanal a {enmascarar_id(dest_id)}: {type(e).__name__}")
 
 
 if __name__ == "__main__":

@@ -351,6 +351,43 @@ def desactivar_suscriptor(chat_id: str, db_path: str = DB_PATH) -> None:
         conn.commit()
 
 
+def purgar_usuarios_inactivos(db_path: str = DB_PATH) -> int:
+    """
+    Limpieza dominical RGPD: elimina por completo de todas las tablas de la base de datos
+    (respuestas_usuarios, encuestas_enviadas, fallos_usuario y suscriptores) cualquier rastro
+    de los usuarios que hayan bloqueado el bot o solicitado la baja (activo = 0).
+    """
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT chat_id FROM suscriptores WHERE COALESCE(activo, 1) = 0"
+        )
+        inactivos = [fila[0] for fila in cursor.fetchall()]
+
+        if not inactivos:
+            return 0
+
+        placeholders = ",".join("?" for _ in inactivos)
+        cursor.execute(
+            f"DELETE FROM respuestas_usuarios WHERE chat_id IN ({placeholders})",
+            inactivos,
+        )
+        cursor.execute(
+            f"DELETE FROM encuestas_enviadas WHERE chat_id IN ({placeholders})",
+            inactivos,
+        )
+        cursor.execute(
+            f"DELETE FROM fallos_usuario WHERE chat_id IN ({placeholders})",
+            inactivos,
+        )
+        cursor.execute(
+            f"DELETE FROM suscriptores WHERE chat_id IN ({placeholders})",
+            inactivos,
+        )
+        conn.commit()
+        return len(inactivos)
+
+
 def extraer_tema_de_referencia(referencia: str) -> str:
     """Extrae el nombre del tema a partir de la referencia ('Tema1 - Constitucion | Artículo 14')."""
     if " | " in referencia:
@@ -1846,6 +1883,13 @@ def main() -> None:
                     print(f"  🏆 Podio semanal enviado a suscriptor {enmascarar_id(dest_id)}")
                 except Exception as e:
                     print(f"  [Aviso] Error enviando podio semanal a {enmascarar_id(dest_id)}: {type(e).__name__}")
+
+    # 5. Limpieza dominical RGPD: purgar por completo de la BD a quienes bloquearon o se dieron de baja
+    if debe_enviar_informe_semanal() or os.getenv("PURGAR_INACTIVOS", "").strip() == "1":
+        eliminados = purgar_usuarios_inactivos(DB_PATH)
+        print(
+            f"🧹 Limpieza dominical RGPD: {eliminados} usuario(s) inactivo(s)/bloqueado(s) eliminados por completo de {DB_PATH}."
+        )
 
 
 if __name__ == "__main__":

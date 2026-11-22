@@ -118,6 +118,30 @@ def ejecutar_auditoria() -> int:
         else:
             alertas.append(f"Hay {bp_invalidos} preguntas con formato inválido en `banco_preguntas`.")
 
+        # 3d. Integridad referencial (sin registros huérfanos de usuarios eliminados)
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM respuestas_usuarios
+            WHERE chat_id NOT IN (SELECT chat_id FROM suscriptores)
+            """
+        )
+        huerf_resp = cursor.fetchone()[0]
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM fallos_usuario
+            WHERE chat_id NOT IN (SELECT chat_id FROM suscriptores)
+            """
+        )
+        huerf_fallos = cursor.fetchone()[0]
+        if huerf_resp == 0 and huerf_fallos == 0:
+            checks_ok.append(
+                "Integridad referencial RGPD (0 datos huérfanos de usuarios eliminados): OK."
+            )
+        else:
+            alertas.append(
+                f"Existen registros huérfanos sin suscriptor (respuestas={huerf_resp}, fallos={huerf_fallos})."
+            )
+
     # 4. Auditoría de archivos rastreados en Git y secretos
     try:
         proc = subprocess.run(

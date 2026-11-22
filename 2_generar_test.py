@@ -671,7 +671,7 @@ def sincronizar_suscriptores(
                                         cursor.execute(
                                             """
                                             UPDATE fragmentos
-                                            SET fallos_pendientes = COALESCE(fallos_pendientes, 0) + 1
+                                            SET fallos_pendientes = 1
                                             WHERE id = ?
                                             """,
                                             (frag_id,),
@@ -680,7 +680,7 @@ def sincronizar_suscriptores(
                                         cursor.execute(
                                             """
                                             UPDATE fragmentos
-                                            SET fallos_pendientes = MAX(0, COALESCE(fallos_pendientes, 0) - 1)
+                                            SET fallos_pendientes = 0
                                             WHERE id = ?
                                             """,
                                             (frag_id,),
@@ -736,12 +736,13 @@ def obtener_fragmentos_para_tanda(
 
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
+        # Enfriamiento de 48 horas: ningún artículo recién preguntado puede volver a salir en 2 días
         cursor.execute(
             """
-            SELECT DISTINCT fragmento_id
+            SELECT fragmento_id
             FROM encuestas_enviadas
-            ORDER BY fecha_envio DESC
-            LIMIT 10
+            WHERE fecha_envio >= datetime('now', '-2 days')
+            GROUP BY fragmento_id
             """
         )
         recien_preguntados = {fila[0] for fila in cursor.fetchall() if fila[0] is not None}
@@ -751,7 +752,7 @@ def obtener_fragmentos_para_tanda(
             SELECT id, referencia, contenido, veces_usado
             FROM fragmentos
             WHERE COALESCE(fallos_pendientes, 0) > 0
-            ORDER BY fallos_pendientes DESC, veces_usado ASC, RANDOM()
+            ORDER BY veces_usado ASC, RANDOM()
             """
         )
         for fid, ref, cont, veces in cursor.fetchall():
@@ -771,9 +772,25 @@ def obtener_fragmentos_para_tanda(
         for fid, ref, cont, veces in cursor.fetchall():
             if len(seleccionados) >= cantidad:
                 break
-            if fid not in ids_usados:
+            if fid not in ids_usados and fid not in recien_preguntados:
                 seleccionados.append((fid, ref, cont, veces, False))
                 ids_usados.add(fid)
+
+        # Respaldo por si el temario tuviera pocos artículos y todos estuvieran en enfriamiento
+        if len(seleccionados) < cantidad:
+            cursor.execute(
+                """
+                SELECT id, referencia, contenido, veces_usado
+                FROM fragmentos
+                ORDER BY veces_usado ASC, RANDOM()
+                """
+            )
+            for fid, ref, cont, veces in cursor.fetchall():
+                if len(seleccionados) >= cantidad:
+                    break
+                if fid not in ids_usados:
+                    seleccionados.append((fid, ref, cont, veces, False))
+                    ids_usados.add(fid)
 
     if not seleccionados:
         raise ValueError(f"La tabla 'fragmentos' en '{db_path}' está vacía.")
@@ -781,14 +798,24 @@ def obtener_fragmentos_para_tanda(
     return seleccionados
 
 
-def incrementar_uso_fragmento(fragmento_id: int, db_path: str = DB_PATH) -> None:
-    """Incrementa el contador veces_usado del fragmento utilizado."""
+def incrementar_uso_fragmento(
+    fragmento_id: int,
+    es_repaso: bool = False,
+    db_path: str = DB_PATH,
+) -> None:
+    """Incrementa `veces_usado` y, si salió como repaso, limpia `fallos_pendientes` para no arrastrarlo."""
     with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE fragmentos SET veces_usado = veces_usado + 1 WHERE id = ?",
-            (fragmento_id,),
-        )
+        if es_repaso:
+            cursor.execute(
+                "UPDATE fragmentos SET veces_usado = veces_usado + 1, fallos_pendientes = 0 WHERE id = ?",
+                (fragmento_id,),
+            )
+        else:
+            cursor.execute(
+                "UPDATE fragmentos SET veces_usado = veces_usado + 1 WHERE id = ?",
+                (fragmento_id,),
+            )
         conn.commit()
 
 
@@ -1358,7 +1385,7 @@ def main() -> None:
             print(f"✅ Pregunta {idx}/{total} enviada a {enviados_ok}/{len(destinatarios)} suscriptores.")
             if idx < total:
                 time.sleep(1.0)
-        incrementar_uso_fragmento(frag_id, DB_PATH)
+        incrementar_uso_fragmento(frag_id, es_repaso=es_repaso, db_path=DB_PATH)
 
     registrar_tanda_enviada(clave_tanda, DB_PATH)
 

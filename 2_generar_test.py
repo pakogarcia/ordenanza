@@ -24,6 +24,7 @@ MAX_REPASOS_POR_TANDA = 2
 FALLBACK_MODELS = [
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
     "gemini-3.6-flash",
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -1275,9 +1276,9 @@ def llamar_gemini(
     contents: str,
     config: types.GenerateContentConfig,
 ):
-    """Llama a Gemini empezando por los modelos más rápidos y cambiando al instante ante 404/429/503/504."""
+    """Llama a Gemini empezando por los modelos más rápidos, con pausa breve ante picos 429/503/504."""
     ultimo_error = None
-    for modelo in FALLBACK_MODELS:
+    for idx, modelo in enumerate(FALLBACK_MODELS):
         try:
             return client.models.generate_content(
                 model=modelo,
@@ -1287,9 +1288,48 @@ def llamar_gemini(
         except (errors.ClientError, errors.ServerError) as e:
             ultimo_error = e
             if getattr(e, "code", None) in (404, 429, 503, 504):
+                if idx < len(FALLBACK_MODELS) - 1:
+                    time.sleep(1.5)
                 continue
             raise
     raise ultimo_error
+
+
+def buscar_cualquier_pregunta_cacheada_respaldo(
+    ids_excluir: set[int],
+    db_path: str = DB_PATH,
+) -> tuple[int, str, int, PreguntaTest] | None:
+    """
+    Respaldo de emergencia si la API de Gemini sufre un corte temporal (503/504):
+    obtiene una pregunta válida de `banco_preguntas` para no cancelar la tanda.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT bp.id, bp.fragmento_id, f.referencia, f.veces_usado,
+                   bp.pregunta, bp.opciones_json, bp.indice_correcta, bp.explicacion
+            FROM banco_preguntas bp
+            JOIN fragmentos f ON f.id = bp.fragmento_id
+            ORDER BY RANDOM()
+            LIMIT 25
+            """
+        )
+        for pid, fid, ref, veces, preg, opc_json, idx_corr, expl in cursor.fetchall():
+            if fid in ids_excluir:
+                continue
+            try:
+                test = PreguntaTest(
+                    pregunta=preg,
+                    opciones=json.loads(opc_json),
+                    indice_correcta=int(idx_corr),
+                    explicacion=expl,
+                )
+                if not obtener_errores_longitud(test):
+                    return int(fid), ref, int(veces), test
+            except Exception:
+                continue
+    return None
 
 
 def generar_pregunta_con_gemini(
@@ -1709,7 +1749,7 @@ def main() -> None:
     client = genai.Client(
         api_key=api_key,
         http_options=types.HttpOptions(
-            timeout=15000,
+            timeout=25000,
             retry_options=types.HttpRetryOptions(attempts=1),
         ),
     )
@@ -1733,19 +1773,34 @@ def main() -> None:
         else:
             modalidad = "directa"
 
-        pregunta_test = generar_pregunta_con_gemini(
-            client=client,
-            referencia=referencia,
-            contenido=contenido,
-            ejemplos=ejemplos,
-            modalidad=modalidad,
-            es_repaso=False,
-        )
-        pregunta_test = mezclar_opciones_test(
-            pregunta_test,
-            posicion_objetivo=bolsa_posiciones[idx - 1],
-        )
-        pregunta_id = guardar_en_banco_preguntas(frag_id, modalidad, pregunta_test, DB_PATH)
+        try:
+            pregunta_test = generar_pregunta_con_gemini(
+                client=client,
+                referencia=referencia,
+                contenido=contenido,
+                ejemplos=ejemplos,
+                modalidad=modalidad,
+                es_repaso=False,
+            )
+            pregunta_test = mezclar_opciones_test(
+                pregunta_test,
+                posicion_objetivo=bolsa_posiciones[idx - 1],
+            )
+            pregunta_id = guardar_en_banco_preguntas(frag_id, modalidad, pregunta_test, DB_PATH)
+        except Exception as e:
+            print(f"[Aviso] Corte temporal en Gemini ({type(e).__name__}); usando respaldo de caché...")
+            respaldo = buscar_cualquier_pregunta_cacheada_respaldo(
+                {p[0] for p in preguntas_comunes}, DB_PATH
+            )
+            if not respaldo:
+                raise
+            frag_id, referencia, veces_usado, pregunta_test = respaldo
+            pregunta_test = mezclar_opciones_test(
+                pregunta_test,
+                posicion_objetivo=bolsa_posiciones[idx - 1],
+            )
+            pregunta_id = guardar_en_banco_preguntas(frag_id, modalidad, pregunta_test, DB_PATH)
+
         imprimir_resultado_consola(
             idx, total, modalidad, False, frag_id, referencia, veces_usado, pregunta_test
         )

@@ -754,23 +754,29 @@ def sincronizar_suscriptores(
         fila_offset = cursor.fetchone()
         offset = int(fila_offset[0]) + 1 if fila_offset else None
 
-        params = {"timeout": 5}
-        if offset is not None:
-            params["offset"] = offset
-
         max_update_id = None
         solicitudes_estadisticas = set()
         solicitudes_ranking = set()
 
         try:
             url_updates = f"https://api.telegram.org/bot{bot_token}/getUpdates"
-            resp = requests.get(url_updates, params=params, timeout=15)
-            datos = resp.json()
-            if resp.ok and datos.get("ok"):
-                for upd in datos.get("result", []):
+            while True:
+                params = {"timeout": 2, "limit": 100}
+                if offset is not None:
+                    params["offset"] = offset
+                resp = requests.get(url_updates, params=params, timeout=15)
+                datos = resp.json()
+                if not (resp.ok and datos.get("ok")):
+                    break
+                lote = datos.get("result", [])
+                if not lote:
+                    break
+
+                for upd in lote:
                     uid = upd.get("update_id")
                     if uid is not None:
                         max_update_id = uid if max_update_id is None else max(max_update_id, uid)
+                        offset = max_update_id + 1
 
                     # A) Procesar cambios de estado de bloqueo del bot (my_chat_member)
                     chat_member = upd.get("my_chat_member")
@@ -875,9 +881,9 @@ def sincronizar_suscriptores(
                                 "🏆 ¡Genial! Vuelves a participar de forma visible en el podio de la Liga Semanal.",
                             )
 
-                        if texto_msg.startswith("/estadistica") or texto_msg.startswith("/informe"):
+                        if texto_msg.startswith(("/estadistica", "/estadística", "/informe")):
                             solicitudes_estadisticas.add(cid)
-                        if texto_msg.startswith("/ranking") or texto_msg.startswith("/podio") or texto_msg.startswith("/liga"):
+                        if texto_msg.startswith(("/ranking", "/podio", "/liga")):
                             solicitudes_ranking.add(cid)
 
                     # C) Procesar respuestas a encuestas (poll_answer)
@@ -966,11 +972,14 @@ def sincronizar_suscriptores(
                                             (user_id, frag_id),
                                         )
 
-                if max_update_id is not None:
-                    cursor.execute(
-                        "INSERT OR REPLACE INTO estado_bot (clave, valor) VALUES ('ultimo_update_id', ?)",
-                        (str(max_update_id),),
-                    )
+                if len(lote) < 100:
+                    break
+
+            if max_update_id is not None:
+                cursor.execute(
+                    "INSERT OR REPLACE INTO estado_bot (clave, valor) VALUES ('ultimo_update_id', ?)",
+                    (str(max_update_id),),
+                )
         except Exception as e:
             print(f"[Aviso] No se pudieron consultar novedades en getUpdates: {type(e).__name__}")
 
@@ -1671,9 +1680,9 @@ def enviar_poll_telegram(
     }
 
     resp = requests.post(url, json=payload, timeout=20)
-    if resp.status_code == 403:
+    if resp.status_code == 403 or (resp.status_code == 400 and "chat not found" in resp.text.lower()):
         desactivar_suscriptor(channel_id)
-        raise RuntimeError(f"Suscriptor {enmascarar_id(channel_id)} bloqueó el bot (desactivado).")
+        raise RuntimeError(f"Suscriptor {enmascarar_id(channel_id)} inactivo/no encontrado (desactivado).")
     datos = resp.json()
     if not resp.ok or not datos.get("ok"):
         raise RuntimeError(f"Error al enviar Poll a {enmascarar_id(channel_id)} (HTTP {resp.status_code})")
@@ -1889,19 +1898,22 @@ def main() -> None:
     # 3. Al final del día (tanda de las 20:00 h o si se fuerza ENVIAR_TIP=1), enviar el TIP DE HOY
     if debe_enviar_tip_hoy():
         print("\nGenerando 💡 TIP DE HOY (cierre del día)...")
-        texto_tip = generar_y_guardar_tip_de_hoy(client=client, db_path=DB_PATH)
-        print("\n" + "=" * 72)
-        print(texto_tip)
-        print("=" * 72 + "\n")
+        try:
+            texto_tip = generar_y_guardar_tip_de_hoy(client=client, db_path=DB_PATH)
+            print("\n" + "=" * 72)
+            print(texto_tip)
+            print("=" * 72 + "\n")
 
-        if destinatarios:
-            time.sleep(1.5)
-            for dest_id in destinatarios:
-                try:
-                    enviar_mensaje_telegram(bot_token, dest_id, texto_tip)
-                except Exception as e:
-                    print(f"[Aviso] Error enviando TIP DE HOY a {enmascarar_id(dest_id)}: {type(e).__name__}")
-            print("✅ 💡 TIP DE HOY enviado a todos los suscriptores.")
+            if destinatarios:
+                time.sleep(1.5)
+                for dest_id in destinatarios:
+                    try:
+                        enviar_mensaje_telegram(bot_token, dest_id, texto_tip)
+                    except Exception as e:
+                        print(f"[Aviso] Error enviando TIP DE HOY a {enmascarar_id(dest_id)}: {type(e).__name__}")
+                print("✅ 💡 TIP DE HOY enviado a todos los suscriptores.")
+        except Exception as e:
+            print(f"[Aviso] No se pudo generar el TIP DE HOY por corte temporal de Gemini ({type(e).__name__}); se continúa sin perder el progreso.")
 
     # 4. Los domingos por la noche (o si ENVIAR_INFORME_SEMANAL=1), enviar el Informe Semanal a cada usuario
     if debe_enviar_informe_semanal() and destinatarios:
